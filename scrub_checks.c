@@ -35,18 +35,44 @@ static int toast_open_indexes(Relation toastrel,
 static void toast_close_indexes(Relation *toastidxs, int num_indexes,
 					LOCKMODE lock);
 
-
+/*
+ * check_page_checksum
+ *	  Verify page checksum, if enabled.
+ *
+ * We do not read the page using BufferRead, because that would verify
+ * the checksum internally and interrupt the check in case of failure
+ * (which we don't want - we want to continue with the other pages).
+ *
+ * Instead we call smgrread() directly, which does all the relfilenode
+ * translation etc. and read() but without the checksum verification.
+ * That however means we're not protected against concurrent writes,
+ * and so may observe torn pages.
+ *
+ * We use the same defense as checksum verification in pg_basebackup,
+ * i.e. if the page checksum fails, we remember the page LSN and read
+ * the page again - if the LSN did not change, we consider this to be
+ * a checksum failure. Otherwise we assume the failure was due to a
+ * torn page and ignore it (effectively considering the checksum OK).
+ */
 bool
-check_page_checksum(Relation reln, ForkNumber forkNum, BlockNumber block)
+check_page_checksum(Relation reln, ForkNumber forkNum, BlockNumber block,
+					ScrubCounters *counters)
 {
 	uint16			checksum;
 	PageHeader		pagehdr;
 	char			buffer[BLCKSZ];
 	XLogRecPtr		page_lsn;
 
-	/* when checksums are not enabled, just report OK */
+	/*
+	 * When data checksums are not enabled, act as if the checksum was
+	 * correct (but do not update any counters, because that would be
+	 * rather confusing).
+	 */
 	if (!DataChecksumsEnabled())
 		return true;
+
+	/* Everything beyond here counts as a checksum verification. */
+	counters->checksums_total += 1;
 
 	/*
 	 * read a copy of the page into a local buffer
@@ -73,18 +99,31 @@ check_page_checksum(Relation reln, ForkNumber forkNum, BlockNumber block)
 	 * atomic, so we may read 4kB of old and 4kB of new data (or possibly
 	 * smaller chunks, depending on OS, file system page size etc.).
 	 *
-	 * So if the checksum check fails, we reread the page and see of the
-	 * page LSN changed - if yes, we assume it's due to this concurrent
-	 * write and we ignore the failure. We can't easily detect when the
-	 * page is not torn (the reread buffer itself may be torn).
+	 * That is, the 8kB page originally looks like [A1,A2] and while we
+	 * do the read() there's a concurrent write [B1,B2]. In that case
+	 * we may read [A1,B2] - a torn page.
 	 *
 	 * We do however assume we can't see effects of the write() in random
-	 * order - we expect a byte to get visible after all preceding bytes.
-	 * So when the second part of the page is "new" we assume the reread
-	 * will see the first part as new too (including the LSN).
+	 * order - we expect a byte to get visible only after all preceding
+	 * bytes. So when the second part of the page is "new" we assume the
+	 * reread will see the first part as new too (including the LSN).
+	 * That is, we may not observe [B1,A2].
 	 *
-	 * We can't simply assume the new page is not torn, and we don't know
-	 * in what way it's torn. So ignoring it seems like the best option.
+	 * So if the checksum check fails, we reread() the page and see if
+	 * the page LSN changed. If the LSN did not change, the page was not
+	 * torn and the checksum really is incorrect.
+	 *
+	 * If the LSN did change, we consider the original page torn, ignore
+	 * the checksum failure and skip the page (effectively considering
+	 * the checksum correct).
+	 *
+	 * We might try verifying checksum on the new page version, but it
+	 * would not tell us much more - a failure might be due to the page
+	 * being torn again (we might repeat the whole dance but that poses
+	 * risk of an infinite loop). So we simply skip this page.
+	 *
+	 * This assumes torn pages are not very frequent, which seems like
+	 * a reasonable assumption.
 	 *
 	 * XXX This is pretty much what we do in basebackup.c, except that
 	 * basebackup reads the pages directly in batches, and we read it
@@ -114,6 +153,8 @@ check_page_checksum(Relation reln, ForkNumber forkNum, BlockNumber block)
 	/* if the LSN did not change, it's a checksum failure */
 	if (page_lsn == PageGetLSN((Page) buffer))
 	{
+		counters->checksums_failed += 1;
+
 		ereport(WARNING,
 				(errmsg("[%d] checksum failure - header %u computed %u",
 						block, pagehdr->pd_checksum, checksum)));
@@ -308,11 +349,16 @@ check_page_header_generic(Page page, BlockNumber block)
 
 bool
 check_page_header(Relation rel, ForkNumber forkNum,
-				  Page page, BlockNumber block)
+				  Page page, BlockNumber block, ScrubCounters *counters)
 {
+	counters->headers_total += 1;
+
 	/* do generic checks first, continue with AM-specific tests if OK */
 	if (!check_page_header_generic(page, block))
+	{
+		counters->headers_failed += 1;
 		return false;
+	}
 
 	return true;
 }
@@ -1759,4 +1805,37 @@ toast_close_indexes(Relation *toastidxs, int num_indexes, LOCKMODE lock)
 	for (i = 0; i < num_indexes; i++)
 		index_close(toastidxs[i], lock);
 	pfree(toastidxs);
+}
+
+
+void
+merge_counters(ScrubCounters *dst, ScrubCounters *src)
+{
+	dst->pages_total += src->pages_total;
+	dst->pages_failed += src->pages_failed;
+
+	dst->checksums_total += src->checksums_total;
+	dst->checksums_failed += src->checksums_failed;
+
+	dst->headers_total += src->headers_total;
+	dst->headers_failed += src->headers_failed;
+
+	dst->heap_pages_total += src->heap_pages_total;
+	dst->heap_pages_failed += src->heap_pages_failed;
+	dst->heap_tuples_total += src->heap_tuples_total;
+	dst->heap_tuples_failed += src->heap_tuples_failed;
+
+	dst->heap_attr_toast_external_invalid += src->heap_attr_toast_external_invalid;
+	dst->heap_attr_compression_broken += src->heap_attr_compression_broken;
+	dst->heap_attr_toast_bytes_total += src->heap_attr_toast_bytes_total;
+	dst->heap_attr_toast_bytes_failed += src->heap_attr_toast_bytes_failed;
+	dst->heap_attr_toast_values_total += src->heap_attr_toast_values_total;
+	dst->heap_attr_toast_values_failed += src->heap_attr_toast_values_failed;
+	dst->heap_attr_toast_chunks_total += src->heap_attr_toast_chunks_total;
+	dst->heap_attr_toast_chunks_failed += src->heap_attr_toast_chunks_failed;
+
+	dst->btree_pages_total += src->btree_pages_total;
+	dst->btree_pages_failed += src->btree_pages_failed;
+	dst->btree_tuples_total += src->btree_tuples_total;
+	dst->btree_tuples_failed += src->btree_tuples_failed;
 }

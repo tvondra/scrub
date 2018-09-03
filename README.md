@@ -60,6 +60,8 @@ Additional checks may be implemented in the future, for example:
 
 * cross-checks between tables and indexes
 
+* other access methods (hash, gin, gist, ...)
+
 
 Install
 -------
@@ -110,6 +112,35 @@ from `scrub_status` function.
     SELECT * FROM scrub_status();
 
 This returns a single row with accumulated counters, possibly covering
-multiple scrub runs. Use `scrub_reset` to reset the statistics.
+multiple scrub runs (unless the data was reset in some way).
+
+The `scrub_status` function returns these fields:
+
+* `is_running` - a flag indicating if the scrub is currently running
+* `pages_total`- pages checked
+* `pages_failed` - pages with some failure
+* `checksums_total` - verified page checksums
+* `checksums_failed` - incorrect page checksums
+* `headers_total` - verified page headers
+* `headers_failed` - corrupted page headers
+* `heap_pages_total` - heap pages checked
+* `heap_pages_failed` - corrupted heap hages
+* `heap_tuples_total` - heap tuples checked
+* `heap_tuples_failed` - corrupted heap tuples
+* `heap_attr_toast_external_invalid` - invalid `EXTERNAL` varlena value
+* `heap_attr_compression_broken` - corrupted compressed value
+* `heap_attr_toast_bytes_total` - size of verified TOAST values
+* `heap_attr_toast_bytes_failed` - size of corrupted TOAST values
+* `heap_attr_toast_values_total` - verified TOAST values
+* `heap_attr_toast_values_failed` - corrupted TOAST values
+* `heap_attr_toast_chunks_total` - verified TOAST chunks
+* `heap_attr_toast_chunks_failed` - corrupted TOAST chunks
+* `btree_pages_total` - btree pages checked
+* `btree_pages_failed` - corrupted btree pages
+* `btree_tuples_total` - btree tuples checked
+* `btree_tuples_failed` - corrupted btree tuples
+
+Function `scrub_reset` can be used to reset the statistics while the
+scrub is running.
 
     SELECT scrub_reset();

@@ -17,19 +17,27 @@
 #include "common/relpath.h"
 #include "utils/rel.h"
 
+/*
+ * A fat structure to track all kinds of statistics - different levels
+ * of checks (checksum, page structure, tuple structure, ...) and types
+ * of objects (heap, indexes, ...).
+ *
+ * We might split this into multiple parts in the future, but this way
+ * we can pass it to all the methods pretty easily.
+ */
 typedef struct ScrubCounters
 {
 	/* page stats */
-	uint64	pages_total;
-	uint64	pages_failed;
+	uint64	pages_total;		/* pages checked */
+	uint64	pages_failed;		/* pages with any failure */
 
 	/* checksum stats */
-	uint64	checksums_total;
-	uint64	checksums_failed;
+	uint64	checksums_total;	/* checksums checked */
+	uint64	checksums_failed;	/* checksum failures (provable) */
 
 	/* header stats */
-	uint64	headers_total;
-	uint64	headers_failed;
+	uint64	headers_total;		/* page headers checked */
+	uint64	headers_failed;		/* page header failures */
 
 	/* heap content checks */
 	uint64	heap_pages_total;
@@ -56,13 +64,17 @@ typedef struct ScrubCounters
 } ScrubCounters;
 
 bool check_page_checksum(Relation rel, ForkNumber forkNum,
-						 BlockNumber block);
+						 BlockNumber block,
+						 ScrubCounters *counters);
 
 bool check_page_header(Relation rel, ForkNumber forkNum,
-					   Page page, BlockNumber block);
+					   Page page, BlockNumber block,
+					   ScrubCounters *counters);
 
 bool check_page_contents(Relation rel, ForkNumber forkNum,
 						 Page page, BlockNumber block,
 						 ScrubCounters *counters);
+
+void merge_counters(ScrubCounters *dest, ScrubCounters *src);
 
 #endif /* SCRUB_CHECKS_H */
