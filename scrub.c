@@ -244,8 +244,6 @@ ScrubSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy 
 		ScrubCounters	counters;
 		bool		failure = true;	/* assume failure */
 
-		bool		checksum_ok = true;
-
 		sprintf(buffer, "scrubbing (\"%s\".\"%s\") : %s %u/%u",
 						get_namespace_name(RelationGetNamespace(reln)),
 						RelationGetRelationName(reln),
@@ -262,14 +260,11 @@ ScrubSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy 
 		page = BufferGetPage(buf);
 
 		/* verify page checksum */
-		if (!check_page_checksum(reln, forkNum, b))
-		{
-			checksum_ok = false;
+		if (!check_page_checksum(reln, forkNum, b, &counters))
 			goto update_stats;
-		}
 
 		/* check page header */
-		if (!check_page_header(reln, forkNum, page, b))
+		if (!check_page_header(reln, forkNum, page, b, &counters))
 			goto update_stats;
 
 		/* check page contents (updates counters directly) */
@@ -281,46 +276,14 @@ ScrubSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy 
 
 update_stats:
 
-		/* Update the status. */
+		/* if anything interrupted the checks, count it as failure */
+		counters.pages_total += 1;
+		counters.pages_failed += (failure) ? 1 : 0;
+
+		/* Update the counters placed in shared memory. */
 		SpinLockAcquire(&ScrubShmem->mutex);
 
-		ScrubShmem->counters.pages_total += 1;
-		ScrubShmem->counters.pages_failed += (failure) ? 1 : 0;
-
-		/* checksum */
-		if (DataChecksumsEnabled())
-		{
-			ScrubShmem->counters.checksums_total += 1;
-
-			if (!checksum_ok)
-				ScrubShmem->counters.checksums_failed += 1;
-		}
-
-		/* contents */
-#define UPDATE_COUNTER(field) \
-	ScrubShmem->counters.field += counters.field
-
-		UPDATE_COUNTER(headers_total);
-		UPDATE_COUNTER(headers_failed);
-
-		UPDATE_COUNTER(heap_pages_total);
-		UPDATE_COUNTER(heap_pages_failed);
-		UPDATE_COUNTER(heap_tuples_total);
-		UPDATE_COUNTER(heap_tuples_failed);
-
-		UPDATE_COUNTER(heap_attr_toast_external_invalid);
-		UPDATE_COUNTER(heap_attr_compression_broken);
-		UPDATE_COUNTER(heap_attr_toast_bytes_total);
-		UPDATE_COUNTER(heap_attr_toast_bytes_failed);
-		UPDATE_COUNTER(heap_attr_toast_values_total);
-		UPDATE_COUNTER(heap_attr_toast_values_failed);
-		UPDATE_COUNTER(heap_attr_toast_chunks_total);
-		UPDATE_COUNTER(heap_attr_toast_chunks_failed);
-
-		UPDATE_COUNTER(btree_pages_total);
-		UPDATE_COUNTER(btree_pages_failed);
-		UPDATE_COUNTER(btree_tuples_total);
-		UPDATE_COUNTER(btree_tuples_failed);
+		merge_counters(&ScrubShmem->counters, &counters);
 
 		SpinLockRelease(&ScrubShmem->mutex);
 
@@ -393,7 +356,7 @@ ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 
 /*
  * ScrubDatabase
- *		scrub a single database.
+ *		scrub a single database
  *
  * We do this by launching a dynamic background worker into this database,
  * and waiting for it to finish.  We have to do this in a separate worker,
