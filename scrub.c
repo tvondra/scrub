@@ -67,12 +67,20 @@ PG_FUNCTION_INFO_V1(scrub_is_running);
 PGDLLEXPORT void ScrubLauncherMain(Datum main_arg);
 PGDLLEXPORT void ScrubWorkerMain(Datum main_arg);
 
+/*
+ * State in shared memory (for launcher + workers)
+ *
+ * FIXME Should use ProcSignal instead of the custom stop_requested flag.
+ */
 typedef struct ScrubShmemStruct
 {
+	/* set on start */
 	pg_atomic_flag launcher_started;
 	bool		stop_requested;
-	bool		success;
 	bool		process_shared_catalogs;
+
+	/* mutex processing the following fields */
+	slock_t		mutex;
 
 	/* parameter values (set on start) */
 	int			cost_delay;
@@ -80,12 +88,12 @@ typedef struct ScrubShmemStruct
 	int			dboid;
 
 	/* current progress/status */
-	slock_t		mutex;
 	ScrubCounters counters;
+	bool		success;
 }			ScrubShmemStruct;
 
 /* Shared memory segment for scrub helper */
-static ScrubShmemStruct * ScrubShmem;
+static ScrubShmemStruct * ScrubShmem = NULL;
 
 /* Bookkeeping for work to do */
 typedef struct DatabaseEntry
@@ -126,26 +134,32 @@ _PG_init(void)
 	RequestAddinShmemSpace(ScrubShmemSize());
 }
 
-
+/* Initialize state in shared memory */
 static void
 scrub_shmem_init(void)
 {
 	bool		found;
 
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+
 	ScrubShmem = ShmemInitStruct("scrub",
 								 ScrubShmemSize(),
 								 &found);
 	if (!found)
-	{
 		memset(ScrubShmem, 0, ScrubShmemSize());
-	}
 
 	LWLockRelease(AddinShmemInitLock);
 }
 
 /*
- * Main entry point for scrub helper launcher process
+ * Main entry point for scrub launcher process
+ *
+ * - cost_delay - throttling (sleep after exhausting cost_limit)
+ * - cost_limit - throttling (amount of work before sleeping)
+ * - reset - determines whether the counters should be reset/zeroed
+ *
+ * XXX Why does this need the dboid? Shouldn't the launcher access just the
+ * pg_database shared catalog, and launch a worker for each database?
  */
 bool
 StartScrubLauncher(int cost_delay, int cost_limit, Oid dboid,
@@ -156,13 +170,18 @@ StartScrubLauncher(int cost_delay, int cost_limit, Oid dboid,
 
 	scrub_shmem_init();
 
+	/*
+	 * Failed to set means somebody else started
+	 *
+	 * XXX Is this interlock reliable? If a launcher exits unexpectedly, it
+	 * may leave the flag set, and we'll be unable to start a new one. It
+	 * would be helpful to know the PID of the other launcher. Actually, it
+	 * seems OK, because we reset it in launcher_exit().
+	 */
 	if (!pg_atomic_test_set_flag(&ScrubShmem->launcher_started))
 	{
-		/*
-		 * Failed to set means somebody else started
-		 */
 		ereport(ERROR,
-				(errmsg("could not start scrub helper: already running")));
+				(errmsg("could not start scrub launcher: already running")));
 	}
 
 	SpinLockAcquire(&ScrubShmem->mutex);
@@ -177,13 +196,15 @@ StartScrubLauncher(int cost_delay, int cost_limit, Oid dboid,
 
 	SpinLockRelease(&ScrubShmem->mutex);
 
+	/* start the launcher worker */
+
 	memset(&bgw, 0, sizeof(bgw));
 	bgw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
 	bgw.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	snprintf(bgw.bgw_library_name, BGW_MAXLEN, "scrub");
 	snprintf(bgw.bgw_function_name, BGW_MAXLEN, "ScrubLauncherMain");
-	snprintf(bgw.bgw_name, BGW_MAXLEN, "scrub helper launcher");
-	snprintf(bgw.bgw_type, BGW_MAXLEN, "scrub helper launcher");
+	snprintf(bgw.bgw_name, BGW_MAXLEN, "scrub launcher");
+	snprintf(bgw.bgw_type, BGW_MAXLEN, "scrub launcher");
 	bgw.bgw_restart_time = BGW_NEVER_RESTART;
 	bgw.bgw_notify_pid = MyProcPid;
 	bgw.bgw_main_arg = (Datum) 0;
@@ -202,6 +223,7 @@ StartScrubLauncher(int cost_delay, int cost_limit, Oid dboid,
 static bool
 ScrubLauncherIsRunning(void)
 {
+	/* Attach the shared memory. */
 	scrub_shmem_init();
 
 	return (!pg_atomic_unlocked_test_flag(&ScrubShmem->launcher_started));
@@ -210,6 +232,7 @@ ScrubLauncherIsRunning(void)
 void
 ShutdownScrubLauncherIfRunning(void)
 {
+	/* Attach the shared memory. */
 	scrub_shmem_init();
 
 	/* If launcher not started, nothing to shut down. */
@@ -236,7 +259,7 @@ should_terminate(void)
 }
 
 /*
- * Scrub a single relation/fork.
+ * Scrub a fork for a given relation.
  *
  * XXX What if the relation gets dropped before we get to it?
  */
@@ -246,13 +269,19 @@ ScrubSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy 
 	BlockNumber numblocks = RelationGetNumberOfBlocksInFork(reln, forkNum);
 	BlockNumber b;
 
+	/* message buffer */
 	char		buffer[1024];
-	char	   *forks[] = {"MAIN", "FSM", "VISIBILITYMAP", "INIT"};
 
 	/*
 	 * Make sure we ignore checksum errors, so that the scrubbing is not
 	 * interrupted on the first checksum error (we want to scan the whole
 	 * relation).
+	 *
+	 * FIXME This seems not great, because it may load corrupted data into
+	 * shared buffers (which ignore_checksum_failure=false would prevent).
+	 * That could cause crashes, instead of elog(ERROR) with checksums.
+	 * Instead, we should check if the page is already in shared buffers, and
+	 * if not do a separate read. Or maybe it could read in PG_TRY?
 	 */
 	ignore_checksum_failure = true;
 
@@ -271,7 +300,7 @@ ScrubSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy 
 		sprintf(buffer, "scrubbing (\"%s\".\"%s\") : %s %u/%u",
 				get_namespace_name(RelationGetNamespace(reln)),
 				RelationGetRelationName(reln),
-				forks[forkNum], b, numblocks);
+				forkNames[forkNum], b, numblocks);
 
 		set_ps_display(buffer);
 
@@ -293,6 +322,10 @@ ScrubSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy 
 		 * XXX We should probably lock the buffer for I/O (so that others
 		 * can't write it out), and read the page ourselves into a small
 		 * private buffer (not into shared buffers). And check that.
+		 *
+		 * XXX Also, won't this fail if the buffer is already in memory, but
+		 * was modified? We only set the checksum when writing blocks to disk,
+		 * so the in-memory version can be wrong (for dirty buffers).
 		 */
 		if (!check_page_checksum(reln, forkNum, b, &counters))
 			goto update_stats;
@@ -338,6 +371,9 @@ update_stats:
 	return true;
 }
 
+/*
+ * Scrub all forks of a relation identified by OID.
+ */
 static bool
 ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 {
@@ -407,11 +443,11 @@ ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 
 /*
  * ScrubDatabase
- *		scrub a single database
+ *		Scrub all relations in a given database.
  *
- * We do this by launching a dynamic background worker into this database,
- * and waiting for it to finish.  We have to do this in a separate worker,
- * since each process can only be connected to one database during it's
+ * Start a dynamic background worker for scrubbing a particular database,
+ * and waits for it to finish. We have do scrubbing in separate workers,
+ * since each process can only be connected to one database during its
  * lifetime.
  */
 static bool
@@ -427,18 +463,18 @@ ScrubDatabase(DatabaseEntry * db)
 	bgw.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	snprintf(bgw.bgw_library_name, BGW_MAXLEN, "scrub");
 	snprintf(bgw.bgw_function_name, BGW_MAXLEN, "ScrubWorkerMain");
-	snprintf(bgw.bgw_name, BGW_MAXLEN, "scrub helper worker");
-	snprintf(bgw.bgw_type, BGW_MAXLEN, "scrub helper worker");
+	snprintf(bgw.bgw_name, BGW_MAXLEN, "scrub worker");
+	snprintf(bgw.bgw_type, BGW_MAXLEN, "scrub worker");
 	bgw.bgw_restart_time = BGW_NEVER_RESTART;
 	bgw.bgw_notify_pid = MyProcPid;
 	bgw.bgw_main_arg = ObjectIdGetDatum(db->dboid);
 
-	elog(LOG, "scrubbing database %d (%s)", db->dboid, db->dbname);
+	elog(LOG, "starting scrub worker for \"%s\" (%d)", db->dbname, db->dboid);
 
 	if (!RegisterDynamicBackgroundWorker(&bgw, &bgw_handle))
 	{
 		ereport(LOG,
-				(errmsg("failed to start worker for scrub helper in %s", db->dbname)));
+				(errmsg("failed to register scrub worker for \"%s\"", db->dbname)));
 		return false;
 	}
 
@@ -446,29 +482,30 @@ ScrubDatabase(DatabaseEntry * db)
 	if (status != BGWH_STARTED)
 	{
 		ereport(LOG,
-				(errmsg("failed to wait for worker startup for scrub helper in %s", db->dbname)));
+				(errmsg("scrub worker for \"%s\" did not start", db->dbname)));
 		return false;
 	}
 
 	ereport(DEBUG1,
-			(errmsg("started background worker for scrub in %s", db->dbname)));
+			(errmsg("started scrub worker for \"%s\"", db->dbname)));
 
 	status = WaitForBackgroundWorkerShutdown(bgw_handle);
 	if (status != BGWH_STOPPED)
 	{
 		ereport(LOG,
-				(errmsg("failed to wait for worker shutdown for scrub helper in %s", db->dbname)));
+				(errmsg("scrub worker for \"%s\" did not stop", db->dbname)));
 		return false;
 	}
 
 	ereport(DEBUG1,
-			(errmsg("background worker for scrub in %s completed", db->dbname)));
+			(errmsg("scrub worker for \"%s\" completed", db->dbname)));
 
 	return ScrubShmem->success;
 }
 
+/* When exiting, launcher needs to reset the flag. */
 static void
-launcher_exit(int code, Datum arg)
+shmem_launcher_exit(int code, Datum arg)
 {
 	pg_atomic_clear_flag(&ScrubShmem->launcher_started);
 }
@@ -483,10 +520,14 @@ ScrubLauncherMain(Datum arg)
 	ListCell   *lc;
 	List	   *DatabaseList;
 
-	on_shmem_exit(launcher_exit, 0);
+	/*
+	 * XXX Probably a race condition - if we crash before installing this
+	 * callback, the flag may get stuck set to true.
+	 */
+	on_shmem_exit(shmem_launcher_exit, 0);
 
 	ereport(LOG,
-			(errmsg("scrub helper launcher started")));
+			(errmsg("scrub launcher started")));
 
 	pqsignal(SIGTERM, die);
 
@@ -503,12 +544,13 @@ ScrubLauncherMain(Datum arg)
 										 BGWORKER_BYPASS_ALLOWCONN);
 
 	/*
-	 * Set up so first run processes shared catalogs, but not once in every db
+	 * Set up so that shared catalogs are scrubbed when processing the first
+	 * database (and then ignored for other databases).
 	 */
 	ScrubShmem->process_shared_catalogs = true;
 
 	/*
-	 * Create a database list.
+	 * Create a list of databases to scrub.
 	 */
 	DatabaseList = BuildDatabaseList();
 
@@ -523,6 +565,8 @@ ScrubLauncherMain(Datum arg)
 	{
 		DatabaseEntry *db = (DatabaseEntry *) lfirst(lc);
 
+		elog(LOG, "starting scrub on database \"%s\"", db->dbname);
+
 		/* Check if the user requested to stop the scrub. */
 		if (should_terminate())
 			break;
@@ -536,16 +580,15 @@ ScrubLauncherMain(Datum arg)
 					(errmsg("failed to scrub db \"%s\"", db->dbname)));
 
 		/*
-		 * Now that one database has completed shared catalogs, we don't have
-		 * to process them again .
+		 * Done with the first database, so disable processing of shared
+		 * catalogs for the following databases.
 		 */
 		ScrubShmem->process_shared_catalogs = false;
 	}
 
 	ereport(LOG,
-			(errmsg("scrub complete, scrub helper launcher shutting down")));
+			(errmsg("scrub complete, launcher shutting down")));
 }
-
 
 /*
  * ScrubShmemSize
@@ -571,7 +614,7 @@ ScrubShmemInit(void)
 {
 	bool		found;
 
-	ScrubShmem = (ScrubShmemStruct *) ShmemInitStruct("Scrub Data",
+	ScrubShmem = (ScrubShmemStruct *) ShmemInitStruct("scrub",
 													  ScrubShmemSize(),
 													  &found);
 
@@ -584,11 +627,11 @@ ScrubShmemInit(void)
 
 /*
  * BuildDatabaseList
- *		Compile a list of all currently available databases in the cluster
+ *		Compile a list of all currently available databases in the cluster.
  *
- * This is intended to create the worklist for the workers to go through, and
- * as we are only concerned with already existing databases we need to ever
- * rebuild this list, which simplifies the coding.
+ * Create a list of all databases that we need to scrub, one by one. We are
+ * concerned only with already existing databases, so we don't need to rebuild
+ * the list at all. That simplifies the coding.
  */
 static List *
 BuildDatabaseList(void)
@@ -641,11 +684,10 @@ BuildDatabaseList(void)
 
 /*
  * BuildRelationList
- *		Compile a list of all relations existing in the database
+ *		Compile a list of all relations existing in the database.
  *
- * Build list of relations to scrub. If shared is true, both shared
- * relations and local ones are returned, else all non-shared relations
- * are returned.
+ * Build list of relations to scrub. If shared is true, both shared relations
+ * and local ones are returned, else only non-shared relations are returned.
  */
 static List *
 BuildRelationList(bool include_shared)
@@ -721,6 +763,8 @@ ScrubWorkerMain(Datum arg)
 	VacuumCostDelay = ScrubShmem->cost_delay;
 	VacuumCostLimit = ScrubShmem->cost_limit;
 	VacuumCostActive = (VacuumCostDelay > 0);
+
+	/* FIXME Seems wrong to have all costs 0, no? */
 	VacuumCostBalance = 0;
 	VacuumCostPageHit = 0;
 	VacuumCostPageMiss = 0;
@@ -755,6 +799,8 @@ ScrubWorkerMain(Datum arg)
 
 /*
  * Start scrub - either on a single database, on all databases.
+ *
+ * FIXME Should allow the cost delay/limit to be NULL as default.
  */
 Datum
 scrub_start(PG_FUNCTION_ARGS)
