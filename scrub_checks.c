@@ -25,17 +25,17 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
-//#include "utils/tqual.h"
+/* #include "utils/tqual.h" */
 
 #include "scrub_checks.h"
 
 
-static int toast_open_indexes(Relation toastrel,
-				   LOCKMODE lock,
-				   Relation **toastidxs,
-				   int *num_indexes);
+static int	toast_open_indexes(Relation toastrel,
+							   LOCKMODE lock,
+							   Relation **toastidxs,
+							   int *num_indexes);
 static void toast_close_indexes(Relation *toastidxs, int num_indexes,
-					LOCKMODE lock);
+								LOCKMODE lock);
 
 /*
  * check_page_checksum
@@ -58,20 +58,20 @@ static void toast_close_indexes(Relation *toastidxs, int num_indexes,
  */
 bool
 check_page_checksum(Relation reln, ForkNumber forkNum, BlockNumber block,
-					ScrubCounters *counters)
+					ScrubCounters * counters)
 {
-	uint16			checksum;
-	PageHeader		pagehdr;
-	XLogRecPtr		page_lsn;
+	uint16		checksum;
+	PageHeader	pagehdr;
+	XLogRecPtr	page_lsn;
 
 	/* XXX the buffer needs to be properly aligned */
-	char			tmp[BLCKSZ + PG_IO_ALIGN_SIZE];
-	char		   *buffer = (char *) TYPEALIGN(PG_IO_ALIGN_SIZE, tmp);
+	char		tmp[BLCKSZ + PG_IO_ALIGN_SIZE];
+	char	   *buffer = (char *) TYPEALIGN(PG_IO_ALIGN_SIZE, tmp);
 
 	/*
-	 * When data checksums are not enabled, act as if the checksum was
-	 * correct (but do not update any counters, because that would be
-	 * rather confusing).
+	 * When data checksums are not enabled, act as if the checksum was correct
+	 * (but do not update any counters, because that would be rather
+	 * confusing).
 	 */
 	if (!DataChecksumsEnabled())
 		return true;
@@ -82,60 +82,60 @@ check_page_checksum(Relation reln, ForkNumber forkNum, BlockNumber block,
 	/*
 	 * read a copy of the page into a local buffer
 	 *
-	 * XXX Using smgrread means we're subject to zero_damaged_pages and so
-	 * on. Not sure that's really desirable.
+	 * XXX Using smgrread means we're subject to zero_damaged_pages and so on.
+	 * Not sure that's really desirable.
 	 */
 	smgrread(reln->rd_smgr, forkNum, block, buffer);
 
 	/*
 	 * Do not verify checksums on new pages - we don't set them.
 	 *
-	 * XXX Calling PageIsNew() is not sufficient here, because the header
-	 * may get corrupted, setting pd_upper=0 incorrectly. Which we'd fail
-	 * to detect. So we should probably verify that new pages are indeed
-	 * filled with zeroes.
+	 * XXX Calling PageIsNew() is not sufficient here, because the header may
+	 * get corrupted, setting pd_upper=0 incorrectly. Which we'd fail to
+	 * detect. So we should probably verify that new pages are indeed filled
+	 * with zeroes.
 	 */
 	if (PageIsNew((Page) buffer))
 		return true;
 
 	/*
-	 * Verify checksum on the non-empty page. It's however possible that
-	 * we read a torn page due to a concurrent write. The write() is not
-	 * atomic, so we may read 4kB of old and 4kB of new data (or possibly
-	 * smaller chunks, depending on OS, file system page size etc.).
+	 * Verify checksum on the non-empty page. It's however possible that we
+	 * read a torn page due to a concurrent write. The write() is not atomic,
+	 * so we may read 4kB of old and 4kB of new data (or possibly smaller
+	 * chunks, depending on OS, file system page size etc.).
 	 *
-	 * That is, the 8kB page originally looks like [A1,A2] and while we
-	 * do the read() there's a concurrent write [B1,B2]. In that case
-	 * we may read [A1,B2] - a torn page.
+	 * That is, the 8kB page originally looks like [A1,A2] and while we do the
+	 * read() there's a concurrent write [B1,B2]. In that case we may read
+	 * [A1,B2] - a torn page.
 	 *
 	 * We do however assume we can't see effects of the write() in random
-	 * order - we expect a byte to get visible only after all preceding
-	 * bytes. So when the second part of the page is "new" we assume the
-	 * reread will see the first part as new too (including the LSN).
-	 * That is, we may not observe [B1,A2].
+	 * order - we expect a byte to get visible only after all preceding bytes.
+	 * So when the second part of the page is "new" we assume the reread will
+	 * see the first part as new too (including the LSN). That is, we may not
+	 * observe [B1,A2].
 	 *
-	 * So if the checksum check fails, we reread() the page and see if
-	 * the page LSN changed. If the LSN did not change, the page was not
-	 * torn and the checksum really is incorrect.
+	 * So if the checksum check fails, we reread() the page and see if the
+	 * page LSN changed. If the LSN did not change, the page was not torn and
+	 * the checksum really is incorrect.
 	 *
-	 * If the LSN did change, we consider the original page torn, ignore
-	 * the checksum failure and skip the page (effectively considering
-	 * the checksum correct).
+	 * If the LSN did change, we consider the original page torn, ignore the
+	 * checksum failure and skip the page (effectively considering the
+	 * checksum correct).
 	 *
-	 * We might try verifying checksum on the new page version, but it
-	 * would not tell us much more - a failure might be due to the page
-	 * being torn again (we might repeat the whole dance but that poses
-	 * risk of an infinite loop). So we simply skip this page.
+	 * We might try verifying checksum on the new page version, but it would
+	 * not tell us much more - a failure might be due to the page being torn
+	 * again (we might repeat the whole dance but that poses risk of an
+	 * infinite loop). So we simply skip this page.
 	 *
-	 * This assumes torn pages are not very frequent, which seems like
-	 * a reasonable assumption.
+	 * This assumes torn pages are not very frequent, which seems like a
+	 * reasonable assumption.
 	 *
 	 * XXX This is pretty much what we do in basebackup.c, except that
-	 * basebackup reads the pages directly in batches, and we read it
-	 * through smgr.
+	 * basebackup reads the pages directly in batches, and we read it through
+	 * smgr.
 	 *
-	 * XXX Does this correctly account the re-reads against vacuum_cost?
-	 * If not, it'll affect the throttling.
+	 * XXX Does this correctly account the re-reads against vacuum_cost? If
+	 * not, it'll affect the throttling.
 	 */
 
 	pagehdr = (PageHeader) buffer;
@@ -235,15 +235,15 @@ check_page_header_generic(Page page, BlockNumber block)
 	{
 		ereport(WARNING,
 				(errmsg("[%d] page LSN %X/%X is ahead of current insert position",
-						block, (uint32)(PageGetLSN(page) >> 32),
+						block, (uint32) (PageGetLSN(page) >> 32),
 						(uint32) PageGetLSN(page))));
 		return false;
 	}
 
 	/*
-	 * All page versions between 0 and 4 are correct, but we only know how
-	 * to do more checks on the most recent format, so just bail out. For
-	 * now we consider pages with obsolete page format to be OK.
+	 * All page versions between 0 and 4 are correct, but we only know how to
+	 * do more checks on the most recent format, so just bail out. For now we
+	 * consider pages with obsolete page format to be OK.
 	 */
 	if (PageGetPageLayoutVersion(page) != 4)
 	{
@@ -254,9 +254,9 @@ check_page_header_generic(Page page, BlockNumber block)
 	}
 
 	/*
-	 * If the page is new, we don't really need to do any further checks.
-	 * New pages are perfectly valid and expected to be found in relations,
-	 * and the code should treat them as empty (i.e. sanely).
+	 * If the page is new, we don't really need to do any further checks. New
+	 * pages are perfectly valid and expected to be found in relations, and
+	 * the code should treat them as empty (i.e. sanely).
 	 */
 	if (PageIsNew(page))
 		return true;
@@ -298,7 +298,7 @@ check_page_header_generic(Page page, BlockNumber block)
 	/*
 	 * There is a simple relationship between the pointers:
 	 *
-	 *     pd_lower <= pg_upper <= pd_special
+	 * pd_lower <= pg_upper <= pd_special
 	 *
 	 * Which we will validate in two steps.
 	 */
@@ -321,11 +321,11 @@ check_page_header_generic(Page page, BlockNumber block)
 
 	/*
 	 * Older PostgreSQL versions (up to 9.2) also had pd_tli, tracking page
-	 * timeline. PostgreSQL 9.3 replaced that with pd_checksum, so we need
-	 * to be careful when reading and interpreting this value.
+	 * timeline. PostgreSQL 9.3 replaced that with pd_checksum, so we need to
+	 * be careful when reading and interpreting this value.
 	 *
-	 * We only check the timeline here - checksums are verified elsewhere,
-	 * and we only check the header structure here.
+	 * We only check the timeline here - checksums are verified elsewhere, and
+	 * we only check the header structure here.
 	 */
 #if (PG_VERSION_NUM < 90300)
 	/* The timeline must not be greater than the current one. */
@@ -354,7 +354,7 @@ check_page_header_generic(Page page, BlockNumber block)
 
 bool
 check_page_header(Relation rel, ForkNumber forkNum,
-				  Page page, BlockNumber block, ScrubCounters *counters)
+				  Page page, BlockNumber block, ScrubCounters * counters)
 {
 	counters->headers_total += 1;
 
@@ -540,7 +540,7 @@ HeapTupleIsVisibleMVCC(HeapTuple htup, Snapshot snapshot)
 }
 
 static bool
-check_toasted_attribute(Snapshot snapshot, struct varlena *attr, ScrubCounters *counters)
+check_toasted_attribute(Snapshot snapshot, struct varlena *attr, ScrubCounters * counters)
 {
 	Relation	toastrel;
 	Relation   *toastidxs;
@@ -726,10 +726,10 @@ cleanup:
 /* checks the individual attributes of the tuple */
 static bool
 check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
-							OffsetNumber off, ScrubCounters *counters)
+							OffsetNumber off, ScrubCounters * counters)
 {
-	HeapTupleData	tuple;
-	HeapTupleHeader	tupheader;
+	HeapTupleData tuple;
+	HeapTupleHeader tupheader;
 	uint16		offset,
 				endoffset;
 	int			i,
@@ -756,11 +756,11 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 	/*
 	 * Assemble a tuple, so that we can do a simple visibility check.
 	 *
-	 * A visibility check has to be done before accessing attributes, as
-	 * the heap may easily contain tuples that do not match the descriptor.
-	 * For example BEGIN + ALTER TABLE ADD COLUMN + INSERT + ROLLBACK will
-	 * produce such tuples, and the extra attribute will not be part of
-	 * a descriptor (thanks to the rollback).
+	 * A visibility check has to be done before accessing attributes, as the
+	 * heap may easily contain tuples that do not match the descriptor. For
+	 * example BEGIN + ALTER TABLE ADD COLUMN + INSERT + ROLLBACK will produce
+	 * such tuples, and the extra attribute will not be part of a descriptor
+	 * (thanks to the rollback).
 	 *
 	 * A visibility fixes this - the visible tuples are guaranteed to match
 	 * the current descriptor, which prevents these issues.
@@ -786,8 +786,8 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 	 * the table in a way that does not require table rewrite (and possibly
 	 * even after a rewrite, not sure).
 	 *
-	 * However, the opposite should never happen - visible on-disk tuples
-	 * must not have more attributes than the descriptor.
+	 * However, the opposite should never happen - visible on-disk tuples must
+	 * not have more attributes than the descriptor.
 	 */
 	if (tuplenatts > rel->rd_att->natts)
 	{
@@ -808,7 +808,7 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 	for (i = 0; i < tuplenatts; i++)
 	{
 		CompactAttribute *attr = TupleDescCompactAttr(rel->rd_att, i);
-		char *attname = get_attname(RelationGetRelid(rel), (i + 1), false);
+		char	   *attname = get_attname(RelationGetRelid(rel), (i + 1), false);
 
 		/* actual length of the attribute value */
 		int			len;
@@ -835,7 +835,7 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 		/* track offset, fix the alignment */
 		offset = att_pointer_alignby(offset, attr->attalignby,
 									 attr->attlen,
-								     buffer + offset);
+									 buffer + offset);
 
 		if (is_varlena)
 		{
@@ -865,8 +865,8 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 			 */
 			if (VARATT_IS_EXTERNAL(buffer + offset))
 			{
-				varatt_external	toast_pointer;
-				int32	extsize = VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer);
+				varatt_external toast_pointer;
+				int32		extsize = VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer);
 
 				if (!VARATT_IS_EXTERNAL_ONDISK(buffer + offset))
 				{
@@ -976,16 +976,16 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 		}
 		else if (is_varwidth)
 		{
-			int remaining_bytes;
+			int			remaining_bytes;
 
 			/*
-			 * Get the C-string length (at most to the end of the tuple).
-			 * To protect against unterminated strings, we use remaining
-			 * bytes of the tuple (which ends at lp_off+lp_len) as end
-			 * for the strnlen call.
+			 * Get the C-string length (at most to the end of the tuple). To
+			 * protect against unterminated strings, we use remaining bytes of
+			 * the tuple (which ends at lp_off+lp_len) as end for the strnlen
+			 * call.
 			 *
-			 * We do know that the \0 terminator is stored in the tuple
-			 * (but not counted by strnlen), so we expect to get
+			 * We do know that the \0 terminator is stored in the tuple (but
+			 * not counted by strnlen), so we expect to get
 			 *
 			 * (len + 1) <= remaining_bytes
 			 *
@@ -1061,9 +1061,9 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 /* checks that the tuples do not overlap and then the individual attributes */
 static bool
 check_heap_tuple(Relation rel, Page page, BlockNumber block,
-				 OffsetNumber off, ScrubCounters *counters)
+				 OffsetNumber off, ScrubCounters * counters)
 {
-	OffsetNumber	off2;
+	OffsetNumber off2;
 	uint16		a_start,
 				a_end;
 	ItemId		lp;
@@ -1075,8 +1075,8 @@ check_heap_tuple(Relation rel, Page page, BlockNumber block,
 	/* check length with respect to lp_flags (unused, normal, redirect, dead) */
 	if (lp->lp_flags == LP_REDIRECT)
 	{
-		uint16	offset,
-				maxoffset;
+		uint16		offset,
+					maxoffset;
 
 		ereport(DEBUG2,
 				(errmsg("[%d:%d] tuple is LP_REDIRECT", block, off)));
@@ -1110,7 +1110,7 @@ check_heap_tuple(Relation rel, Page page, BlockNumber block,
 		}
 
 		/* the target item is neither NORMAL nor DEAD */
-		if ((header->pd_linp[offset- 1].lp_flags != LP_NORMAL) &&
+		if ((header->pd_linp[offset - 1].lp_flags != LP_NORMAL) &&
 			(header->pd_linp[offset - 1].lp_flags != LP_DEAD))
 		{
 			ereport(WARNING,
@@ -1160,8 +1160,8 @@ check_heap_tuple(Relation rel, Page page, BlockNumber block,
 
 		/*
 		 * We intentionally don't return here, because for DEAD tuples with
-		 * storage we want to do the cross-check with other tuples below.
-		 * More thorough checks on offset/length are part of the cross-check.
+		 * storage we want to do the cross-check with other tuples below. More
+		 * thorough checks on offset/length are part of the cross-check.
 		 */
 	}
 	else if (lp->lp_flags == LP_NORMAL)
@@ -1218,15 +1218,15 @@ check_heap_tuple(Relation rel, Page page, BlockNumber block,
 
 	for (off2 = 1; off2 < off; off2++)
 	{
-		uint16	b_start,
-				b_end;
+		uint16		b_start,
+					b_end;
 
-		ItemId	lp2 = PageGetItemId(page, off2);
+		ItemId		lp2 = PageGetItemId(page, off2);
 
 		/*
 		 * We only care about items with storage here, so we can skip
-		 * LP_UNUSED and LP_REDIRECT right away, and LP_DEAD if they
-		 * have no storage.
+		 * LP_UNUSED and LP_REDIRECT right away, and LP_DEAD if they have no
+		 * storage.
 		 */
 		if ((lp2->lp_flags == LP_UNUSED) ||
 			(lp2->lp_flags == LP_REDIRECT) ||
@@ -1237,8 +1237,8 @@ check_heap_tuple(Relation rel, Page page, BlockNumber block,
 		b_end = lp2->lp_off + lp2->lp_len;
 
 		/*
-		 * When two intervals do not overlap, then one has to end before
-		 * the other.
+		 * When two intervals do not overlap, then one has to end before the
+		 * other.
 		 */
 		if (!((a_end <= b_start) || (b_end <= a_start)))
 		{
@@ -1257,12 +1257,12 @@ check_heap_tuple(Relation rel, Page page, BlockNumber block,
 /* checks heap tuples (table) on the page, one by one */
 static bool
 check_page_heap(Relation rel, Page page, BlockNumber block,
-				ScrubCounters *counters)
+				ScrubCounters * counters)
 {
 	/* tuple checks */
-	int		maxoff = PageGetMaxOffsetNumber(page);
-	int		off;
-	bool	success = true;
+	int			maxoff = PageGetMaxOffsetNumber(page);
+	int			off;
+	bool		success = true;
 
 	/* XXX Can we get maxoff > MaxHeapTuplesPerPage here? */
 
@@ -1288,7 +1288,7 @@ check_page_heap(Relation rel, Page page, BlockNumber block,
 static bool
 check_btree_attributes(Relation rel, Page page, BlockNumber block,
 					   OffsetNumber off, int dlen,
-					   ScrubCounters *counters)
+					   ScrubCounters * counters)
 {
 	IndexTuple	tuple;
 	int			i,
@@ -1338,7 +1338,7 @@ check_btree_attributes(Relation rel, Page page, BlockNumber block,
 	for (i = 0; i < rel->rd_att->natts; i++)
 	{
 		CompactAttribute *attr = TupleDescCompactAttr(rel->rd_att, i);
-		char *attname = get_attname(RelationGetRelid(rel), (i + 1), false);
+		char	   *attname = get_attname(RelationGetRelid(rel), (i + 1), false);
 
 		/* actual length of the attribute value */
 		int			len;
@@ -1402,16 +1402,16 @@ check_btree_attributes(Relation rel, Page page, BlockNumber block,
 		}
 		else if (is_varwidth)
 		{
-			int remaining_bytes;
+			int			remaining_bytes;
 
 			/*
-			 * Get the C-string length (at most to the end of the tuple).
-			 * To protect against unterminated strings, we use remaining
-			 * bytes of the tuple (which ends at lp_off+lp_len) as end
-			 * for the strnlen call.
+			 * Get the C-string length (at most to the end of the tuple). To
+			 * protect against unterminated strings, we use remaining bytes of
+			 * the tuple (which ends at lp_off+lp_len) as end for the strnlen
+			 * call.
 			 *
-			 * We do know that the \0 terminator is stored in the tuple
-			 * (but not counted by strnlen), so we expect to get
+			 * We do know that the \0 terminator is stored in the tuple (but
+			 * not counted by strnlen), so we expect to get
 			 *
 			 * (len + 1) <= remaining_bytes
 			 *
@@ -1442,9 +1442,10 @@ check_btree_attributes(Relation rel, Page page, BlockNumber block,
 
 			/*
 			 * XXX We can get here for internal pages, because we include only
-			 * values needed to decide where to go next. In that case we should
-			 * not print the warning at all. We should still do some checks,
-			 * e.g. that we matched the expected end of data, and so on.
+			 * values needed to decide where to go next. In that case we
+			 * should not print the warning at all. We should still do some
+			 * checks, e.g. that we matched the expected end of data, and so
+			 * on.
 			 */
 			Assert(!P_ISLEAF(opaque));
 
@@ -1493,13 +1494,13 @@ check_btree_attributes(Relation rel, Page page, BlockNumber block,
 /* FIXME This should do exactly the same checks of lp_flags as in heap.c */
 static bool
 btree_check_tuple(Relation rel, Page page, BlockNumber block, OffsetNumber off,
-				  ScrubCounters *counters)
+				  ScrubCounters * counters)
 {
 	int			dlen;
 	IndexTuple	itup;
-	OffsetNumber	off2,
-					a_start,
-					a_end;
+	OffsetNumber off2,
+				a_start,
+				a_end;
 
 	ItemId		lp = PageGetItemId(page, off);
 
@@ -1518,8 +1519,8 @@ btree_check_tuple(Relation rel, Page page, BlockNumber block, OffsetNumber off,
 	/*
 	 * We only expect LP_NORMAL, LP_UNUSED and LP_DEAD items in indexes.
 	 * LP_DEAD is used by index scans to "kill" dead tuples that became
-	 * invisible to all transactions. So report any items with
-	 * unexpected status.
+	 * invisible to all transactions. So report any items with unexpected
+	 * status.
 	 *
 	 * XXX LP_UNUSED items were already handled by a preceding check.
 	 */
@@ -1539,12 +1540,12 @@ btree_check_tuple(Relation rel, Page page, BlockNumber block, OffsetNumber off,
 
 	/* [A,B] vs [C,D] */
 	a_start = lp->lp_off;
-	a_end   = lp->lp_off + lp->lp_len;
+	a_end = lp->lp_off + lp->lp_len;
 
 	for (off2 = 1; off2 < off; off2++)
 	{
-		OffsetNumber	b_start,
-						b_end;
+		OffsetNumber b_start,
+					b_end;
 		ItemId		lp2 = PageGetItemId(page, off2);
 
 		/*
@@ -1566,8 +1567,8 @@ btree_check_tuple(Relation rel, Page page, BlockNumber block, OffsetNumber off,
 		b_end = lp2->lp_off + lp2->lp_len;
 
 		/*
-		 * When two intervals do not overlap, then one has to end before
-		 * the other.
+		 * When two intervals do not overlap, then one has to end before the
+		 * other.
 		 */
 		if (!((a_end <= b_start) || (b_end <= a_start)))
 		{
@@ -1590,12 +1591,12 @@ btree_check_tuple(Relation rel, Page page, BlockNumber block, OffsetNumber off,
 /* checks index tuples on the page, one by one */
 static bool
 check_page_tuples_btree(Relation rel, Page page, BlockNumber block,
-						ScrubCounters *counters)
+						ScrubCounters * counters)
 {
 	/* tuple checks */
-	OffsetNumber	maxoffset = PageGetMaxOffsetNumber(page);
-	OffsetNumber	off;
-	bool			success = true;
+	OffsetNumber maxoffset = PageGetMaxOffsetNumber(page);
+	OffsetNumber off;
+	bool		success = true;
 
 	ereport(DEBUG1,
 			(errmsg("[%d] max number of tuples = %d", block, maxoffset)));
@@ -1617,10 +1618,10 @@ check_page_tuples_btree(Relation rel, Page page, BlockNumber block,
 
 static bool
 check_page_btree(Relation rel, Page page, BlockNumber block,
-				 ScrubCounters *counters)
+				 ScrubCounters * counters)
 {
-	PageHeader		header = (PageHeader) page;
-	BTPageOpaque	opaque;
+	PageHeader	header = (PageHeader) page;
+	BTPageOpaque opaque;
 
 	/*
 	 * Block 0 is a meta-page, otherwise it's a regular index-page.
@@ -1646,19 +1647,19 @@ check_page_btree(Relation rel, Page page, BlockNumber block,
 		}
 
 		/*
-		 * FIXME Check that the btm_root/btm_fastroot is between 1 and
-		 * number of index blocks.
+		 * FIXME Check that the btm_root/btm_fastroot is between 1 and number
+		 * of index blocks.
 		 *
-		 * FIXME Check that the btm_level/btm_fastlevel is equal to the
-		 * level fo the root block.
+		 * FIXME Check that the btm_level/btm_fastlevel is equal to the level
+		 * fo the root block.
 		 */
 
 		return true;
 	}
 
 	/*
-	 * Non-metapage, so it's supposed to have special area at the end.
-	 * Check that there's just sufficient amount of space for index data.
+	 * Non-metapage, so it's supposed to have special area at the end. Check
+	 * that there's just sufficient amount of space for index data.
 	 */
 	if (header->pd_special > BLCKSZ - sizeof(BTPageOpaque))
 	{
@@ -1671,15 +1672,15 @@ check_page_btree(Relation rel, Page page, BlockNumber block,
 	}
 
 	/*
-	 * Get the opaque pointer. At this point we can just use the macro,
-	 * as pd_special was thoroughly tested.
+	 * Get the opaque pointer. At this point we can just use the macro, as
+	 * pd_special was thoroughly tested.
 	 */
 	opaque = (BTPageOpaque) PageGetSpecialPointer(page);
 
 	/*
 	 * If the page is a leaf page, then level needs to be 0. Otherwise, it
-	 * should be greater than 0. Deleted pages don't have a level though,
-	 * the level field is replaced with an XID.
+	 * should be greater than 0. Deleted pages don't have a level though, the
+	 * level field is replaced with an XID.
 	 */
 	if (!P_ISDELETED(opaque))
 	{
@@ -1709,7 +1710,7 @@ check_page_btree(Relation rel, Page page, BlockNumber block,
 
 bool
 check_page_contents(Relation rel, ForkNumber forkNum,
-					Page page, BlockNumber block, ScrubCounters *counters)
+					Page page, BlockNumber block, ScrubCounters * counters)
 {
 	switch (rel->rd_rel->relkind)
 	{
@@ -1831,7 +1832,7 @@ toast_close_indexes(Relation *toastidxs, int num_indexes, LOCKMODE lock)
 
 
 void
-merge_counters(ScrubCounters *dst, ScrubCounters *src)
+merge_counters(ScrubCounters * dst, ScrubCounters * src)
 {
 	dst->pages_total += src->pages_total;
 	dst->pages_failed += src->pages_failed;

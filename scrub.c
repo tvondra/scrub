@@ -3,7 +3,29 @@
  * scrub.c
  *	  Backend worker to walk the database and check consistency of data.
  *
- * 
+ * It's common for most of the data to be cold, accessed only very rarely.
+ * That means a data corruption can go unnoticed for a very long time, which
+ * makes it hard to identify and fix the root cause. It may even allow more
+ * data to get corrupted. In any case, the corruption is often discovered
+ * much later, when the data is actually needed.
+ *
+ * It seems reasonable to have a process that regularly scans the data, and
+ * checks for data corruption in all data files. Physical backups can't do
+ * this, because the data is copied at the filesystem level - it can detect
+ * some filesystem/hardware issues, but not logical data corruption. Logical
+ * backups can detect some cases of logical data corruption, but mostly only
+ * in tables (not indexes).
+ *
+ * The idea of this extension is to have a background worker, scanning data
+ * in all data files, and checking for a range of data corruption types.
+ * This should happen in the background, with low priority, in order to not
+ * interfere with user queries.
+ *
+ * This requires a different mindset. The usual database code assumes there
+ * is no data corruption, which simplifies accessing tuples on pages, etc.
+ * This extension assume there is data corruption, and tries to validate the
+ * data in various ways before accessing it.
+ *
  *
  * IDENTIFICATION
  *	  scrub.c
@@ -59,8 +81,7 @@ typedef struct ScrubShmemStruct
 
 	/* current progress/status */
 	slock_t		mutex;
-	ScrubCounters	counters;
-
+	ScrubCounters counters;
 }			ScrubShmemStruct;
 
 /* Shared memory segment for scrub helper */
@@ -113,8 +134,8 @@ scrub_shmem_init(void)
 
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	ScrubShmem = ShmemInitStruct("scrub",
-								ScrubShmemSize(),
-								&found);
+								 ScrubShmemSize(),
+								 &found);
 	if (!found)
 	{
 		memset(ScrubShmem, 0, ScrubShmemSize());
@@ -128,7 +149,7 @@ scrub_shmem_init(void)
  */
 bool
 StartScrubLauncher(int cost_delay, int cost_limit, Oid dboid,
-						 bool reset)
+				   bool reset)
 {
 	BackgroundWorker bgw;
 	BackgroundWorkerHandle *bgw_handle;
@@ -204,7 +225,7 @@ ShutdownScrubLauncherIfRunning(void)
 static bool
 should_terminate(void)
 {
-	bool terminate;
+	bool		terminate;
 
 	/* Set flag in shared memory, so that bgworkers stop. */
 	SpinLockAcquire(&ScrubShmem->mutex);
@@ -225,13 +246,13 @@ ScrubSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy 
 	BlockNumber numblocks = RelationGetNumberOfBlocksInFork(reln, forkNum);
 	BlockNumber b;
 
-	char	buffer[1024];
-	char   *forks[] = {"MAIN", "FSM", "VISIBILITYMAP", "INIT"};
+	char		buffer[1024];
+	char	   *forks[] = {"MAIN", "FSM", "VISIBILITYMAP", "INIT"};
 
 	/*
-	 * Make sure we ignore checksum errors, so that the scrubbing is
-	 * not interrupted on the first checksum error (we want to scan the
-	 * whole relation).
+	 * Make sure we ignore checksum errors, so that the scrubbing is not
+	 * interrupted on the first checksum error (we want to scan the whole
+	 * relation).
 	 */
 	ignore_checksum_failure = true;
 
@@ -244,13 +265,13 @@ ScrubSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy 
 		Buffer		buf = ReadBufferExtended(reln, forkNum, b, RBM_NORMAL, strategy);
 		Page		page;
 
-		ScrubCounters	counters;
-		bool		failure = true;	/* assume failure */
+		ScrubCounters counters;
+		bool		failure = true; /* assume failure */
 
 		sprintf(buffer, "scrubbing (\"%s\".\"%s\") : %s %u/%u",
-						get_namespace_name(RelationGetNamespace(reln)),
-						RelationGetRelationName(reln),
-						forks[forkNum], b, numblocks);
+				get_namespace_name(RelationGetNamespace(reln)),
+				RelationGetRelationName(reln),
+				forks[forkNum], b, numblocks);
 
 		set_ps_display(buffer);
 
@@ -266,8 +287,8 @@ ScrubSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy 
 		 * verify page checksum
 		 *
 		 * XXX This is a bit pointless, because we check the checksums when
-		 * reading the page into shared buffers, and that already happened
-		 * in ReadBufferExtended above. So this can't find a failure, IMO.
+		 * reading the page into shared buffers, and that already happened in
+		 * ReadBufferExtended above. So this can't find a failure, IMO.
 		 *
 		 * XXX We should probably lock the buffer for I/O (so that others
 		 * can't write it out), and read the page ourselves into a small
@@ -301,8 +322,8 @@ update_stats:
 		SpinLockRelease(&ScrubShmem->mutex);
 
 		/*
-		 * XXX maybe we could create a copy of the page, unlock it and
-		 * then do the checks on the copy?
+		 * XXX maybe we could create a copy of the page, unlock it and then do
+		 * the checks on the copy?
 		 */
 		UnlockReleaseBuffer(buf);
 
@@ -346,13 +367,13 @@ ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 		goto cleanup;
 
 	elog(LOG, "scrubbing relation %d (\"%s\".\"%s\")", relationId,
-			  get_namespace_name(RelationGetNamespace(rel)),
-			  RelationGetRelationName(rel));
+		 get_namespace_name(RelationGetNamespace(rel)),
+		 RelationGetRelationName(rel));
 
 	/* update process title */
 	sprintf(buffer, "scrubbing (\"%s\".\"%s\")",
-					get_namespace_name(RelationGetNamespace(rel)),
-					RelationGetRelationName(rel));
+			get_namespace_name(RelationGetNamespace(rel)),
+			RelationGetRelationName(rel));
 	set_ps_display(buffer);
 
 	RelationGetSmgr(rel);
@@ -497,8 +518,8 @@ ScrubLauncherMain(Datum arg)
 	DatabaseList = BuildDatabaseList();
 
 	/*
-	 * If there are no databases at all to scrub, we can exit immediately
-	 * as there is no work to do.
+	 * If there are no databases at all to scrub, we can exit immediately as
+	 * there is no work to do.
 	 */
 	if (DatabaseList == NIL || list_length(DatabaseList) == 0)
 		return;
@@ -512,16 +533,16 @@ ScrubLauncherMain(Datum arg)
 			break;
 
 		/*
-		 * The database may have disappeared, in which case the scrub
-		 * will fail. But we want to continue with the other items.
+		 * The database may have disappeared, in which case the scrub will
+		 * fail. But we want to continue with the other items.
 		 */
 		if (!ScrubDatabase(db))
 			ereport(WARNING,
 					(errmsg("failed to scrub db \"%s\"", db->dbname)));
 
 		/*
-		 * Now that one database has completed shared catalogs, we
-		 * don't have to process them again .
+		 * Now that one database has completed shared catalogs, we don't have
+		 * to process them again .
 		 */
 		ScrubShmem->process_shared_catalogs = false;
 	}
@@ -746,15 +767,16 @@ ScrubWorkerMain(Datum arg)
 Datum
 scrub_start(PG_FUNCTION_ARGS)
 {
-	Oid		dboid = InvalidOid;
-	int		cost_delay = PG_GETARG_INT32(1);
-	int		cost_limit = PG_GETARG_INT32(2);
-	bool	reset = PG_GETARG_BOOL(3);
+	Oid			dboid = InvalidOid;
+	int			cost_delay = PG_GETARG_INT32(1);
+	int			cost_limit = PG_GETARG_INT32(2);
+	bool		reset = PG_GETARG_BOOL(3);
 
 	/* Is dbname supplied? */
 	if (!PG_ARGISNULL(0))
 	{
-		Name	dbName = PG_GETARG_NAME(0);
+		Name		dbName = PG_GETARG_NAME(0);
+
 		dboid = get_database_oid(NameStr(*dbName), false);
 	}
 
@@ -816,12 +838,12 @@ scrub_is_running(PG_FUNCTION_ARGS)
 Datum
 scrub_status(PG_FUNCTION_ARGS)
 {
-	HeapTuple		tuple;
-	TupleDesc		tupdesc;
-	bool			running;
+	HeapTuple	tuple;
+	TupleDesc	tupdesc;
+	bool		running;
 
-	Datum			values[23];
-	bool			isnull[23];
+	Datum		values[23];
+	bool		isnull[23];
 
 	/* attach to shared memory (does not matter if done repeatedly) */
 	scrub_shmem_init();

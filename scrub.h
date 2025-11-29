@@ -23,14 +23,14 @@ extern Size ScrubShmemSize(void);
 extern void ScrubShmemInit(void);
 
 /* Start the background processes for scrubbig */
-bool StartScrubLauncher(int cost_delay, int cost_limit, Oid dboid,
-							  bool reset);
+bool		StartScrubLauncher(int cost_delay, int cost_limit, Oid dboid,
+							   bool reset);
 
 /* Shutdown the background processes, if any */
-void ShutdownScrubLauncherIfRunning(void);
+void		ShutdownScrubLauncherIfRunning(void);
 
 /* Background worker entrypoints */
-void ScrubLauncherMain(Datum arg);
-void ScrubWorkerMain(Datum arg);
+void		ScrubLauncherMain(Datum arg);
+void		ScrubWorkerMain(Datum arg);
 
 #endif							/* SCRUB_H */
