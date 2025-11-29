@@ -11,21 +11,13 @@
 
 #include "postgres.h"
 
-#include "access/htup.h"
-#include "access/htup_details.h"
-#include "access/nbtree.h"
 #include "access/detoast.h"
 #include "access/heaptoast.h"
 #include "access/xact.h"
-#include "catalog/pg_am.h"
 #include "funcapi.h"
-#include "storage/checksum.h"
-#include "storage/smgr.h"
-#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
-/* #include "utils/tqual.h" */
 
 #include "scrub.h"
 
