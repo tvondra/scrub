@@ -362,10 +362,6 @@ ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 
 	rel = relation_open(relationId, AccessShareLock);
 
-	/* skip relations without a storage */
-	if (!RELKIND_HAS_STORAGE(rel->rd_rel->relkind))
-		goto cleanup;
-
 	elog(LOG, "scrubbing relation %d (\"%s\".\"%s\")", relationId,
 		 get_namespace_name(RelationGetNamespace(rel)),
 		 RelationGetRelationName(rel));
@@ -398,7 +394,6 @@ ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 		}
 	}
 
-cleanup:
 	relation_close(rel, AccessShareLock);
 
 	/* cleanup the snapshot */
@@ -675,11 +670,8 @@ BuildRelationList(bool include_shared)
 		if (pgc->relisshared && !include_shared)
 			continue;
 
-		/*
-		 * Foreign tables have by definition no local storage that can be
-		 * scrubbed, so just skip them.
-		 */
-		if (pgc->relkind == RELKIND_FOREIGN_TABLE)
+		/* skip relations without a storage */
+		if (!RELKIND_HAS_STORAGE(pgc->relkind))
 			continue;
 
 		oldctx = MemoryContextSwitchTo(ctx);
