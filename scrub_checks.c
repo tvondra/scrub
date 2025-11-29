@@ -1439,6 +1439,15 @@ check_btree_attributes(Relation rel, Page page, BlockNumber block,
 					(errmsg("[%d:%d] attribute '%s' (offset=%d length=%d) overflows tuple end (off=%d, len=%d)",
 							block, off, attname,
 							offset, len, linp->lp_off, linp->lp_len)));
+
+			/*
+			 * XXX We can get here for internal pages, because we include only
+			 * values needed to decide where to go next. In that case we should
+			 * not print the warning at all. We should still do some checks,
+			 * e.g. that we matched the expected end of data, and so on.
+			 */
+			Assert(!P_ISLEAF(opaque));
+
 			return false;
 		}
 
