@@ -380,7 +380,17 @@ HeapTupleIsVisibleMVCC(HeapTuple htup, Snapshot snapshot)
 {
 	HeapTupleHeader tuple = htup->t_data;
 
+	/*
+	 * Assert that the caller has registered the snapshot.  This function
+	 * doesn't care about the registration as such, but in general you
+	 * shouldn't try to use a snapshot without registration because it might
+	 * get invalidated while it's still in use, and this is a convenient place
+	 * to check for that.
+	 */
+	Assert(snapshot->regd_count > 0 || snapshot->active_count > 0);
+
 	Assert(ItemPointerIsValid(&htup->t_self));
+	Assert(htup->t_tableOid != InvalidOid);
 
 	if (!HeapTupleHeaderXminCommitted(tuple))
 	{
@@ -394,7 +404,6 @@ HeapTupleIsVisibleMVCC(HeapTuple htup, Snapshot snapshot)
 
 			if (TransactionIdIsCurrentTransactionId(xvac))
 				return false;
-
 			if (!XidInMVCCSnapshot(xvac, snapshot))
 			{
 				if (TransactionIdDidCommit(xvac))
@@ -410,7 +419,6 @@ HeapTupleIsVisibleMVCC(HeapTuple htup, Snapshot snapshot)
 			{
 				if (XidInMVCCSnapshot(xvac, snapshot))
 					return false;
-
 				if (!TransactionIdDidCommit(xvac))
 					return false;
 			}
