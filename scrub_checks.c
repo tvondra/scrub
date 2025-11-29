@@ -62,8 +62,11 @@ check_page_checksum(Relation reln, ForkNumber forkNum, BlockNumber block,
 {
 	uint16			checksum;
 	PageHeader		pagehdr;
-	char			buffer[BLCKSZ];
 	XLogRecPtr		page_lsn;
+
+	/* XXX the buffer needs to be properly aligned */
+	char			tmp[BLCKSZ + PG_IO_ALIGN_SIZE];
+	char		   *buffer = (char *) TYPEALIGN(PG_IO_ALIGN_SIZE, tmp);
 
 	/*
 	 * When data checksums are not enabled, act as if the checksum was
