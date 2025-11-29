@@ -324,8 +324,20 @@ ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 	Relation	rel;
 	ForkNumber	fnum;
 	char		buffer[1024];
+	Snapshot	snapshot = SnapshotAny;
 
 	StartTransactionCommand();
+
+	/*
+	 * properly install a valid snapshot, make sure it's active
+	 *
+	 * XXX This creates a snapshot for the whole scrub the current relation.
+	 * Maybe that's too long, and could cause issues with holding xmin back,
+	 * and so on? Then maybe create shorter snapshots for blocks or a couple
+	 * of blocks?
+	 */
+	snapshot = RegisterSnapshot(GetTransactionSnapshot());
+	PushActiveSnapshot(snapshot);
 
 	rel = relation_open(relationId, AccessShareLock);
 	RelationGetSmgr(rel);
@@ -361,6 +373,10 @@ ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 	}
 
 	relation_close(rel, AccessShareLock);
+
+	/* cleanup the snapshot */
+	PopActiveSnapshot();
+	UnregisterSnapshot(snapshot);
 
 	CommitTransactionCommand();
 

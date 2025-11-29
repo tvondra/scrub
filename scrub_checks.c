@@ -735,7 +735,7 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 	int			i,
 				tuplenatts;
 	bool		has_nulls = false;
-	Snapshot	snapshot = GetTransactionSnapshot();
+	Snapshot	snapshot = GetActiveSnapshot();
 	bool		success = true;
 
 	/* page as a simple array of bytes */
