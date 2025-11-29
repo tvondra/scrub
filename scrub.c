@@ -262,7 +262,17 @@ ScrubSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy 
 		/* Do we already have a valid checksum? */
 		page = BufferGetPage(buf);
 
-		/* verify page checksum */
+		/*
+		 * verify page checksum
+		 *
+		 * XXX This is a bit pointless, because we check the checksums when
+		 * reading the page into shared buffers, and that already happened
+		 * in ReadBufferExtended above. So this can't find a failure, IMO.
+		 *
+		 * XXX We should probably lock the buffer for I/O (so that others
+		 * can't write it out), and read the page ourselves into a small
+		 * private buffer (not into shared buffers). And check that.
+		 */
 		if (!check_page_checksum(reln, forkNum, b, &counters))
 			goto update_stats;
 
