@@ -3,7 +3,7 @@
 
 MODULE_big = scrub
 
-OBJS = scrub.o scrub_common.o scrub_btree.o scrub_heap.o
+OBJS = scrub.o scrub_common.o scrub_btree.o scrub_heap.o scrub_toast.o
 
 EXTENSION = scrub
 DATA = scrub--1.0.sql
