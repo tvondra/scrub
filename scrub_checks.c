@@ -1313,8 +1313,12 @@ check_btree_attributes(Relation rel, Page page, BlockNumber block,
 	 * For non-leaf pages, the first data tuple may or may not actually have
 	 * any data. See src/backend/access/nbtree/README, "Notes About Data
 	 * Representation".
+	 *
+	 * FIXME This may not be quite right. Maybe we should only check this on
+	 * (non-)leaf pages? But then it causes assert failures. However, why
+	 * shouldn't we be checking the hikey attributes too?
 	 */
-	if (!P_ISLEAF(opaque) && off == P_FIRSTDATAKEY(opaque) && dlen == 0)
+	if (off < P_FIRSTDATAKEY(opaque))
 	{
 		ereport(DEBUG3,
 				(errmsg("[%d:%d] first data key tuple on non-leaf block => no data, skipping",
