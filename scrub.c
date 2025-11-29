@@ -35,9 +35,13 @@
 #include "postgres.h"
 
 #include "scrub.h"
-#include "scrub_checks.h"
 
+#include "access/heapam.h"
 #include "access/htup_details.h"
+#include "access/relation.h"
+#include "access/relscan.h"
+#include "access/table.h"
+#include "access/tableam.h"
 #include "access/xact.h"
 #include "catalog/pg_database.h"
 #include "commands/dbcommands.h"
