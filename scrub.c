@@ -340,7 +340,10 @@ ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 	PushActiveSnapshot(snapshot);
 
 	rel = relation_open(relationId, AccessShareLock);
-	RelationGetSmgr(rel);
+
+	/* skip relations without a storage */
+	if (!RELKIND_HAS_STORAGE(rel->rd_rel->relkind))
+		goto cleanup;
 
 	elog(LOG, "scrubbing relation %d (\"%s\".\"%s\")", relationId,
 			  get_namespace_name(RelationGetNamespace(rel)),
@@ -351,6 +354,8 @@ ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 					get_namespace_name(RelationGetNamespace(rel)),
 					RelationGetRelationName(rel));
 	set_ps_display(buffer);
+
+	RelationGetSmgr(rel);
 
 	/* process all forks existing for the relation */
 	for (fnum = 0; fnum <= MAX_FORKNUM; fnum++)
@@ -372,6 +377,7 @@ ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 		}
 	}
 
+cleanup:
 	relation_close(rel, AccessShareLock);
 
 	/* cleanup the snapshot */
