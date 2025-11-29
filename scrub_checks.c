@@ -14,16 +14,18 @@
 #include "access/htup.h"
 #include "access/htup_details.h"
 #include "access/nbtree.h"
-#include "access/tuptoaster.h"
+#include "access/detoast.h"
+#include "access/heaptoast.h"
 #include "access/xact.h"
 #include "catalog/pg_am.h"
 #include "funcapi.h"
 #include "storage/checksum.h"
 #include "storage/smgr.h"
 #include "utils/fmgroids.h"
+#include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
-#include "utils/tqual.h"
+//#include "utils/tqual.h"
 
 #include "scrub_checks.h"
 
@@ -200,11 +202,11 @@ check_page_header_generic(Page page, BlockNumber block)
 					header->pd_special, header->pd_upper - header->pd_lower)));
 
 	/* check the page size (should be BLCKSZ) */
-	if (PageGetPageSize(header) != BLCKSZ)
+	if (PageGetPageSize(page) != BLCKSZ)
 	{
 		ereport(WARNING,
 				(errmsg("[%d] invalid page size %d (%d)", block,
-						(int) PageGetPageSize(header), BLCKSZ)));
+						(int) PageGetPageSize(page), BLCKSZ)));
 		return false;
 	}
 
@@ -214,12 +216,12 @@ check_page_header_generic(Page page, BlockNumber block)
 	 * the format, so we only do them for the current version, which is
 	 * PG_PAGE_LAYOUT_VERSION (4).
 	 */
-	if ((PageGetPageLayoutVersion(header) < 0) ||
-		(PageGetPageLayoutVersion(header) > 4))
+	if ((PageGetPageLayoutVersion(page) < 0) ||
+		(PageGetPageLayoutVersion(page) > 4))
 	{
 		ereport(WARNING,
 				(errmsg("[%d] invalid page layout version %d",
-						block, PageGetPageLayoutVersion(header))));
+						block, PageGetPageLayoutVersion(page))));
 		return false;
 	}
 
@@ -240,11 +242,11 @@ check_page_header_generic(Page page, BlockNumber block)
 	 * to do more checks on the most recent format, so just bail out. For
 	 * now we consider pages with obsolete page format to be OK.
 	 */
-	if (PageGetPageLayoutVersion(header) != 4)
+	if (PageGetPageLayoutVersion(page) != 4)
 	{
 		ereport(WARNING,
 				(errmsg("[%d] obsolete page layout version %d, skipping",
-						block, PageGetPageLayoutVersion(header))));
+						block, PageGetPageLayoutVersion(page))));
 		return true;
 	}
 
@@ -253,7 +255,7 @@ check_page_header_generic(Page page, BlockNumber block)
 	 * New pages are perfectly valid and expected to be found in relations,
 	 * and the code should treat them as empty (i.e. sanely).
 	 */
-	if (PageIsNew(header))
+	if (PageIsNew(page))
 		return true;
 
 	/*
@@ -561,7 +563,7 @@ check_toasted_attribute(Snapshot snapshot, struct varlena *attr, ScrubCounters *
 	/* Must copy to access aligned fields */
 	VARATT_EXTERNAL_GET_POINTER(toast_pointer, attr);
 
-	ressize = toast_pointer.va_extsize;
+	ressize = VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer);
 	numchunks = ((ressize - 1) / TOAST_MAX_CHUNK_SIZE) + 1;
 
 	/* track total expected values */
@@ -572,7 +574,7 @@ check_toasted_attribute(Snapshot snapshot, struct varlena *attr, ScrubCounters *
 	/*
 	 * Open the toast relation and its indexes
 	 */
-	toastrel = heap_open(toast_pointer.va_toastrelid, AccessShareLock);
+	toastrel = table_open(toast_pointer.va_toastrelid, AccessShareLock);
 	toasttupDesc = toastrel->rd_att;
 
 	/* Look for the valid index of the toast relation */
@@ -702,7 +704,7 @@ cleanup:
 	 */
 	systable_endscan_ordered(toastscan);
 	toast_close_indexes(toastidxs, num_indexes, AccessShareLock);
-	heap_close(toastrel, AccessShareLock);
+	table_close(toastrel, AccessShareLock);
 
 	if (!success)
 	{
@@ -802,7 +804,8 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 	/* check all the attributes */
 	for (i = 0; i < tuplenatts; i++)
 	{
-		Form_pg_attribute attr = &rel->rd_att->attrs[i];
+		CompactAttribute *attr = TupleDescCompactAttr(rel->rd_att, i);
+		char *attname = get_attname(RelationGetRelid(rel), (i + 1), false);
 
 		/* actual length of the attribute value */
 		int			len;
@@ -821,14 +824,15 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 		{
 			ereport(DEBUG3,
 					(errmsg("[%d:%d] attribute '%s' is NULL (skipping)",
-							block, off, attr->attname.data)));
+							block, off, attname)));
 			has_nulls = true;	/* remember we've seen NULL value */
 			continue;
 		}
 
 		/* track offset, fix the alignment */
-		offset = att_align_pointer(offset, attr->attalign, attr->attlen,
-								   buffer + offset);
+		offset = att_pointer_alignby(offset, attr->attalignby,
+									 attr->attlen,
+								     buffer + offset);
 
 		if (is_varlena)
 		{
@@ -847,7 +851,7 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 			{
 				ereport(WARNING,
 						(errmsg("[%d:%d] attribute '%s' has negative length < 0 (%d)",
-								block, off, attr->attname.data, len)));
+								block, off, attname, len)));
 				return false;
 			}
 
@@ -859,12 +863,13 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 			if (VARATT_IS_EXTERNAL(buffer + offset))
 			{
 				varatt_external	toast_pointer;
+				int32	extsize = VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer);
 
 				if (!VARATT_IS_EXTERNAL_ONDISK(buffer + offset))
 				{
 					ereport(WARNING,
 							(errmsg("[%d:%d] attribute '%s' is EXTERNAL but not ONDISK",
-									block, off, attr->attname.data)));
+									block, off, attname)));
 					counters->heap_attr_toast_external_invalid += 1;
 					return false;
 				}
@@ -883,7 +888,7 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 					 */
 					ereport(WARNING,
 							(errmsg("[%d:%d] external attribute '%s' has invalid raw length %d",
-									block, off, attr->attname.data, toast_pointer.va_rawsize)));
+									block, off, attname, toast_pointer.va_rawsize)));
 
 					counters->heap_attr_toast_external_invalid += 1;
 					success = false;
@@ -892,8 +897,8 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 				}
 
 
-				if ((toast_pointer.va_extsize < 0) ||
-					(toast_pointer.va_extsize > 1024 * 1024 * 1024L))
+				if ((extsize < 0) ||
+					(extsize > 1024 * 1024 * 1024L))
 				{
 					/*
 					 * This does not break the page structure (it's just a
@@ -903,7 +908,7 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 					 */
 					ereport(WARNING,
 							(errmsg("[%d:%d] external attribute '%s' has invalid external length %d",
-									block, off, attr->attname.data, toast_pointer.va_extsize)));
+									block, off, attname, extsize)));
 
 					counters->heap_attr_toast_external_invalid += 1;
 					success = false;
@@ -923,7 +928,7 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 				{
 					ereport(WARNING,
 							(errmsg("[%d:%d] failed to detoast attribute '%s'",
-									block, off, attr->attname.data)));
+									block, off, attname)));
 
 					success = false;
 					offset += len;	/* move to the next attribute */
@@ -934,8 +939,8 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 			if (VARATT_IS_COMPRESSED(buffer + offset))
 			{
 				/* the raw length should be less than 1G (and positive) */
-				if ((VARRAWSIZE_4B_C(buffer + offset) < 0) ||
-					(VARRAWSIZE_4B_C(buffer + offset) > 1024 * 1024 * 1024L))
+				if ((VARSIZE_ANY_EXHDR(buffer + offset) < 0) ||
+					(VARSIZE_ANY_EXHDR(buffer + offset) > 1024 * 1024 * 1024L))
 				{
 					/*
 					 * This does not break the page structure (it's just a
@@ -944,9 +949,9 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 					 * attribute.
 					 */
 					ereport(WARNING,
-							(errmsg("[%d:%d] attribute '%s' has invalid length %d",
-									block, off, attr->attname.data,
-									VARRAWSIZE_4B_C(buffer + offset))));
+							(errmsg("[%d:%d] attribute '%s' has invalid length %zd",
+									block, off, attname,
+									VARSIZE_ANY_EXHDR(buffer + offset))));
 
 					counters->heap_attr_compression_broken += 1;
 					success = false;
@@ -1005,7 +1010,7 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 			/* the attribute overflows end of the tuple (on disk) */
 			ereport(WARNING,
 					(errmsg("[%d:%d] attribute '%s' (off=%d len=%d) overflows tuple end (off=%d, len=%d)",
-							block, off, attr->attname.data,
+							block, off, attname,
 							offset, len, lp->lp_off, lp->lp_len)));
 			return false;
 		}
@@ -1015,7 +1020,7 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 
 		ereport(DEBUG3,
 				(errmsg("[%d:%d] attribute '%s' length=%d",
-						block, off, attr->attname.data, len)));
+						block, off, attname, len)));
 	}
 
 	ereport(DEBUG3,
@@ -1325,7 +1330,8 @@ check_btree_attributes(Relation rel, Page page, BlockNumber block,
 	 */
 	for (i = 0; i < rel->rd_att->natts; i++)
 	{
-		Form_pg_attribute attr = &rel->rd_att->attrs[i];
+		CompactAttribute *attr = TupleDescCompactAttr(rel->rd_att, i);
+		char *attname = get_attname(RelationGetRelid(rel), (i + 1), false);
 
 		/* actual length of the attribute value */
 		int			len;
@@ -1344,8 +1350,8 @@ check_btree_attributes(Relation rel, Page page, BlockNumber block,
 		}
 
 		/* fix the alignment (see src/include/access/tupmacs.h) */
-		offset = att_align_pointer(offset, attr->attalign, attr->attlen,
-								   buffer + offset);
+		offset = att_pointer_alignby(offset, attr->attalignby,
+									 attr->attlen, buffer + offset);
 
 		if (is_varlena)
 		{
@@ -1360,7 +1366,7 @@ check_btree_attributes(Relation rel, Page page, BlockNumber block,
 			{
 				ereport(WARNING,
 						(errmsg("[%d:%d] attribute '%s' has negative length < 0 (%d)",
-								block, off, attr->attname.data, len)));
+								block, off, attname, len)));
 				return false;
 			}
 
@@ -1369,20 +1375,20 @@ check_btree_attributes(Relation rel, Page page, BlockNumber block,
 			{
 				ereport(WARNING,
 						(errmsg("[%d:%d] attribute '%s' is marked as EXTERNAL",
-								block, off, attr->attname.data)));
+								block, off, attname)));
 				return false;
 			}
 
 			if (VARATT_IS_COMPRESSED(buffer + offset))
 			{
 				/* the raw length should be less than 1G (and positive) */
-				if ((VARRAWSIZE_4B_C(buffer + offset) < 0) ||
-					(VARRAWSIZE_4B_C(buffer + offset) > 1024 * 1024 * 1024L))
+				if ((VARSIZE_ANY_EXHDR(buffer + offset) < 0) ||
+					(VARSIZE_ANY_EXHDR(buffer + offset) > 1024 * 1024 * 1024L))
 				{
 					ereport(WARNING,
-							(errmsg("[%d:%d]  attribute '%s' has invalid length %d (should be between 0 and 1G)",
-									block, off, attr->attname.data,
-									VARRAWSIZE_4B_C(buffer + offset))));
+							(errmsg("[%d:%d]  attribute '%s' has invalid length %zd (should be between 0 and 1G)",
+									block, off, attname,
+									VARSIZE_ANY_EXHDR(buffer + offset))));
 					return false;
 				}
 			}
@@ -1424,7 +1430,7 @@ check_btree_attributes(Relation rel, Page page, BlockNumber block,
 		{
 			ereport(WARNING,
 					(errmsg("[%d:%d] attribute '%s' (offset=%d length=%d) overflows tuple end (off=%d, len=%d)",
-							block, off, attr->attname.data,
+							block, off, attname,
 							offset, len, linp->lp_off, linp->lp_len)));
 			return false;
 		}
@@ -1434,7 +1440,7 @@ check_btree_attributes(Relation rel, Page page, BlockNumber block,
 
 		ereport(DEBUG3,
 				(errmsg("[%d:%d] attribute '%s' len=%d",
-						block, off, attr->attname.data, len)));
+						block, off, attname, len)));
 	}
 
 	ereport(DEBUG3,
@@ -1661,14 +1667,14 @@ check_page_btree(Relation rel, Page page, BlockNumber block,
 	 */
 	if (!P_ISDELETED(opaque))
 	{
-		if (P_ISLEAF(opaque) && (opaque->btpo.level > 0))
+		if (P_ISLEAF(opaque) && (opaque->btpo_level > 0))
 		{
 			ereport(WARNING,
 					(errmsg("[%d] is leaf page, but level %d is not zero",
-							block, opaque->btpo.level)));
+							block, opaque->btpo_level)));
 			return false;
 		}
-		else if (!P_ISLEAF(opaque) && (opaque->btpo.level == 0))
+		else if (!P_ISLEAF(opaque) && (opaque->btpo_level == 0))
 		{
 			ereport(WARNING,
 					(errmsg("[%d] is a non-leaf page, but level is zero",

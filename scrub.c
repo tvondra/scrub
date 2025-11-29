@@ -249,7 +249,7 @@ ScrubSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy 
 						RelationGetRelationName(reln),
 						forks[forkNum], b, numblocks);
 
-		set_ps_display(buffer, false);
+		set_ps_display(buffer);
 
 		memset(&counters, 0, sizeof(ScrubCounters));
 
@@ -298,7 +298,7 @@ update_stats:
 			return false;
 
 		/* If not, do the throttling. */
-		vacuum_delay_point();
+		vacuum_delay_point(false);
 	}
 
 	return true;
@@ -315,7 +315,7 @@ ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 	StartTransactionCommand();
 
 	rel = relation_open(relationId, AccessShareLock);
-	RelationOpenSmgr(rel);
+	RelationGetSmgr(rel);
 
 	elog(LOG, "scrubbing relation %d (\"%s\".\"%s\")", relationId,
 			  get_namespace_name(RelationGetNamespace(rel)),
@@ -325,7 +325,7 @@ ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 	sprintf(buffer, "scrubbing (\"%s\".\"%s\")",
 					get_namespace_name(RelationGetNamespace(rel)),
 					RelationGetRelationName(rel));
-	set_ps_display(buffer, false);
+	set_ps_display(buffer);
 
 	/* process all forks existing for the relation */
 	for (fnum = 0; fnum <= MAX_FORKNUM; fnum++)
@@ -441,7 +441,7 @@ ScrubLauncherMain(Datum arg)
 
 	BackgroundWorkerUnblockSignals();
 
-	init_ps_display("scrub launcher", "", "", "");
+	init_ps_display("scrub launcher");
 
 	scrub_shmem_init();
 
@@ -544,15 +544,15 @@ BuildDatabaseList(void)
 {
 	List	   *DatabaseList = NIL;
 	Relation	rel;
-	HeapScanDesc scan;
+	TableScanDesc scan;
 	HeapTuple	tup;
 	MemoryContext ctx = CurrentMemoryContext;
 	MemoryContext oldctx;
 
 	StartTransactionCommand();
 
-	rel = heap_open(DatabaseRelationId, AccessShareLock);
-	scan = heap_beginscan_catalog(rel, 0, NULL);
+	rel = table_open(DatabaseRelationId, AccessShareLock);
+	scan = table_beginscan_catalog(rel, 0, NULL);
 
 	while (HeapTupleIsValid(tup = heap_getnext(scan, ForwardScanDirection)))
 	{
@@ -560,7 +560,7 @@ BuildDatabaseList(void)
 		DatabaseEntry *db;
 
 		if ((ScrubShmem->dboid != InvalidOid) &&
-			(ScrubShmem->dboid != HeapTupleGetOid(tup)))
+			(ScrubShmem->dboid != pgdb->oid))
 			continue;
 
 		if (!pgdb->datallowconn)
@@ -572,7 +572,7 @@ BuildDatabaseList(void)
 
 		db = (DatabaseEntry *) palloc(sizeof(DatabaseEntry));
 
-		db->dboid = HeapTupleGetOid(tup);
+		db->dboid = pgdb->oid;
 		db->dbname = pstrdup(NameStr(pgdb->datname));
 
 		DatabaseList = lappend(DatabaseList, db);
@@ -580,8 +580,8 @@ BuildDatabaseList(void)
 		MemoryContextSwitchTo(oldctx);
 	}
 
-	heap_endscan(scan);
-	heap_close(rel, AccessShareLock);
+	table_endscan(scan);
+	table_close(rel, AccessShareLock);
 
 	CommitTransactionCommand();
 
@@ -601,15 +601,15 @@ BuildRelationList(bool include_shared)
 {
 	List	   *RelationList = NIL;
 	Relation	rel;
-	HeapScanDesc scan;
+	TableScanDesc scan;
 	HeapTuple	tup;
 	MemoryContext ctx = CurrentMemoryContext;
 	MemoryContext oldctx;
 
 	StartTransactionCommand();
 
-	rel = heap_open(RelationRelationId, AccessShareLock);
-	scan = heap_beginscan_catalog(rel, 0, NULL);
+	rel = table_open(RelationRelationId, AccessShareLock);
+	scan = table_beginscan_catalog(rel, 0, NULL);
 
 	while (HeapTupleIsValid(tup = heap_getnext(scan, ForwardScanDirection)))
 	{
@@ -629,7 +629,7 @@ BuildRelationList(bool include_shared)
 		oldctx = MemoryContextSwitchTo(ctx);
 		relentry = (RelationEntry *) palloc(sizeof(RelationEntry));
 
-		relentry->reloid = HeapTupleGetOid(tup);
+		relentry->reloid = pgc->oid;
 		relentry->relkind = pgc->relkind;
 
 		RelationList = lappend(RelationList, relentry);
@@ -637,8 +637,8 @@ BuildRelationList(bool include_shared)
 		MemoryContextSwitchTo(oldctx);
 	}
 
-	heap_endscan(scan);
-	heap_close(rel, AccessShareLock);
+	table_endscan(scan);
+	table_close(rel, AccessShareLock);
 
 	CommitTransactionCommand();
 
@@ -660,7 +660,7 @@ ScrubWorkerMain(Datum arg)
 
 	BackgroundWorkerUnblockSignals();
 
-	init_ps_display("scrub worker", "", "", "");
+	init_ps_display("scrub worker");
 
 	BackgroundWorkerInitializeConnectionByOid(dboid, InvalidOid,
 											  BGWORKER_BYPASS_ALLOWCONN);
@@ -674,9 +674,9 @@ ScrubWorkerMain(Datum arg)
 	VacuumCostLimit = ScrubShmem->cost_limit;
 	VacuumCostActive = (VacuumCostDelay > 0);
 	VacuumCostBalance = 0;
-	VacuumPageHit = 0;
-	VacuumPageMiss = 0;
-	VacuumPageDirty = 0;
+	VacuumCostPageHit = 0;
+	VacuumCostPageMiss = 0;
+	VacuumCostPageDirty = 0;
 
 	/*
 	 * Create and set the vacuum strategy as our buffer strategy
