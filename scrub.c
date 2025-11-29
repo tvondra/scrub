@@ -42,6 +42,9 @@ PG_FUNCTION_INFO_V1(scrub_status);
 PG_FUNCTION_INFO_V1(scrub_reset);
 PG_FUNCTION_INFO_V1(scrub_is_running);
 
+PGDLLEXPORT void ScrubLauncherMain(Datum main_arg);
+PGDLLEXPORT void ScrubWorkerMain(Datum main_arg);
+
 typedef struct ScrubShmemStruct
 {
 	pg_atomic_flag launcher_started;
