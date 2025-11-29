@@ -79,19 +79,19 @@ typedef struct ScrubCounters
 
 }			ScrubCounters;
 
-bool		check_page_checksum(Relation rel, ForkNumber forkNum,
-								BlockNumber block,
-								ScrubCounters * counters);
+bool check_page_checksum(Relation rel, ForkNumber forkNum,
+						 BlockNumber block,
+						 ScrubCounters * counters);
 
-bool		check_page_header(Relation rel, ForkNumber forkNum,
-							  Page page, BlockNumber block,
-							  ScrubCounters * counters);
+bool check_page_header(Relation rel, ForkNumber forkNum,
+					   Page page, BlockNumber block,
+					   ScrubCounters * counters);
 
-bool		check_page_contents(Relation rel, ForkNumber forkNum,
-								Page page, BlockNumber block,
-								ScrubCounters * counters);
+bool check_page_contents(Relation rel, ForkNumber forkNum,
+						 Page page, BlockNumber block,
+						 ScrubCounters * counters);
 
-void		merge_counters(ScrubCounters * dest, ScrubCounters * src);
+void merge_counters(ScrubCounters * dest, ScrubCounters * src);
 
 bool check_page_heap(Relation rel, Page page, BlockNumber block,
 					 ScrubCounters * counters);
