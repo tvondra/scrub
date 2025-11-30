@@ -372,6 +372,14 @@ check_page_contents(Relation rel, ForkNumber forkNum,
 
 		case RELKIND_INDEX:
 
+			/*
+			 * Some indexes have fsm and init fork (e.g. spgist), so skip that.
+			 *
+			 * XXX We can do some generic FSM checking, I think.
+			 */
+			if ((forkNum == FSM_FORKNUM) || (forkNum == INIT_FORKNUM))
+				return true;
+
 			Assert(forkNum == MAIN_FORKNUM);
 
 			/* btree */
