@@ -386,7 +386,10 @@ ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 	snapshot = RegisterSnapshot(GetTransactionSnapshot());
 	PushActiveSnapshot(snapshot);
 
-	rel = relation_open(relationId, AccessShareLock);
+	/* The relation might have been dropped since the list was created. */
+	rel = try_relation_open(relationId, AccessShareLock);
+	if (rel == NULL)
+		goto cleanup;
 
 	elog(LOG, "scrubbing relation %d (\"%s\".\"%s\")", relationId,
 		 get_namespace_name(RelationGetNamespace(rel)),
@@ -421,6 +424,8 @@ ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 	}
 
 	relation_close(rel, AccessShareLock);
+
+cleanup:
 
 	/* cleanup the snapshot */
 	PopActiveSnapshot();
