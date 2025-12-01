@@ -401,8 +401,6 @@ ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 			RelationGetRelationName(rel));
 	set_ps_display(buffer);
 
-	RelationGetSmgr(rel);
-
 	/* process all forks existing for the relation */
 	for (fnum = 0; fnum <= MAX_FORKNUM; fnum++)
 	{
@@ -413,7 +411,7 @@ ScrubSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 			break;
 		}
 
-		if (smgrexists(rel->rd_smgr, fnum))
+		if (smgrexists(RelationGetSmgr(rel), fnum))
 		{
 			if (!ScrubSingleRelationFork(rel, fnum, strategy))
 			{
