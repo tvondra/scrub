@@ -68,6 +68,7 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 	 */
 	tuple.t_data = tupheader;
 	tuple.t_len = ItemIdGetLength(lp);
+	tuple.t_tableOid = RelationGetRelid(rel);
 	ItemPointerSet(&(tuple.t_self), block, off);
 
 	/*
