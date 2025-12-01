@@ -332,6 +332,8 @@ static bool
 check_page_tuples_btree(Relation rel, Page page, BlockNumber block,
 						ScrubCounters * counters)
 {
+	BTPageOpaque opaque = (BTPageOpaque) PageGetSpecialPointer(page);
+
 	/* tuple checks */
 	OffsetNumber maxoffset = PageGetMaxOffsetNumber(page);
 	OffsetNumber off;
@@ -340,8 +342,14 @@ check_page_tuples_btree(Relation rel, Page page, BlockNumber block,
 	ereport(DEBUG1,
 			(errmsg("[%d] max number of tuples = %d", block, maxoffset)));
 
-	/* FIXME this should check lp_flags, just as the heap check */
-	for (off = 1; off <= maxoffset; off++)
+	/*
+	 * FIXME this should check lp_flags, just as the heap check
+	 *
+	 * FIXME The P_FIRSTDATAKEY check may be too early, we want to check the
+	 * earlier entries too, just without the check_btree_attributes call (it
+	 * gets confused when calculating number of attributes for these entries).
+	 */
+	for (off = P_FIRSTDATAKEY(opaque); off <= maxoffset; off++)
 	{
 		counters->btree_tuples_total += 1;
 
