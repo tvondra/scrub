@@ -300,6 +300,18 @@ ScrubSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy 
 		page = BufferGetPage(buf);
 
 		/*
+		 * Skip empty pages, and treat them as non-failures.
+		 *
+		 * XXX Should this check the page is all-zeroes?
+		 * XXX Could we know that some new pages are actually failures?
+		 */
+		if (PageIsNew(page))
+		{
+			failure = false;
+			goto update_stats;
+		}
+
+		/*
 		 * verify page checksum
 		 *
 		 * XXX This is a bit pointless, because we check the checksums when
