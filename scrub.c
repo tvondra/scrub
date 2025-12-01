@@ -169,10 +169,7 @@ StartScrubLauncher(int cost_delay, int cost_limit, Oid dboid,
 	 * seems OK, because we reset it in launcher_exit().
 	 */
 	if (!pg_atomic_test_set_flag(&ScrubShmem->launcher_started))
-	{
-		ereport(ERROR,
-				(errmsg("could not start scrub launcher: already running")));
-	}
+		return false;
 
 	SpinLockAcquire(&ScrubShmem->mutex);
 
@@ -802,6 +799,7 @@ scrub_start(PG_FUNCTION_ARGS)
 	int			cost_delay = PG_GETARG_INT32(1);
 	int			cost_limit = PG_GETARG_INT32(2);
 	bool		reset = PG_GETARG_BOOL(3);
+	bool		ret;
 
 	/* Is dbname supplied? */
 	if (!PG_ARGISNULL(0))
@@ -819,11 +817,9 @@ scrub_start(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errmsg("cost limit must be a positive value")));
 
-	if (!StartScrubLauncher(cost_delay, cost_limit, dboid, reset))
-		ereport(ERROR,
-				(errmsg("failed to start scrub launcher process")));
+	ret = StartScrubLauncher(cost_delay, cost_limit, dboid, reset);
 
-	PG_RETURN_BOOL(true);
+	PG_RETURN_BOOL(ret);
 }
 
 /*
