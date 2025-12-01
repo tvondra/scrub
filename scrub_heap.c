@@ -168,7 +168,7 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 			if (VARATT_IS_EXTERNAL(buffer + offset))
 			{
 				varatt_external toast_pointer;
-				int32		extsize = VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer);
+				int32		extsize;
 
 				if (!VARATT_IS_EXTERNAL_ONDISK(buffer + offset))
 				{
@@ -201,6 +201,7 @@ check_heap_tuple_attributes(Relation rel, Page page, BlockNumber block,
 					continue;
 				}
 
+				extsize = VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer);
 
 				if ((extsize < 0) ||
 					(extsize > 1024 * 1024 * 1024L))
