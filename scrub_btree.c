@@ -32,6 +32,7 @@ check_btree_attributes(Relation rel, Page page, BlockNumber block,
 	ItemId		linp;
 	bool		has_nulls = false;
 	bits8	   *nulls;
+	int			natts;
 
 	/* page as a simple array of bytes */
 	char	   *buffer = (char *) page;
@@ -43,6 +44,18 @@ check_btree_attributes(Relation rel, Page page, BlockNumber block,
 
 	/* current attribute offset - always starts at (raw_page + off) */
 	offset = linp->lp_off + IndexInfoFindDataOffset(tuple->t_info);
+
+	/* get number of attributes in this tuple */
+	natts = BTreeTupleGetNAtts(tuple, rel);
+
+	/* XXX can the natt be negative? */
+	if (natts > rel->rd_att->natts)
+	{
+		ereport(WARNING,
+				(errmsg("[%d:%d] index tuple has more attributes %d than relation %d",
+						block, off, natts, rel->rd_att->natts)));
+		return false;
+	}
 
 	/*
 	 * For non-leaf pages, the first data tuple may or may not actually have
@@ -70,7 +83,7 @@ check_btree_attributes(Relation rel, Page page, BlockNumber block,
 	 * TODO This is mostly copy'n'paste from check_heap_tuple_attributes, so
 	 * maybe it could be refactored to share the code.
 	 */
-	for (i = 0; i < rel->rd_att->natts; i++)
+	for (i = 0; i < natts; i++)
 	{
 		CompactAttribute *attr = TupleDescCompactAttr(rel->rd_att, i);
 		char	   *attname = get_attname(RelationGetRelid(rel), (i + 1), false);
@@ -174,15 +187,6 @@ check_btree_attributes(Relation rel, Page page, BlockNumber block,
 					(errmsg("[%d:%d] attribute '%s' (offset=%d length=%d) overflows tuple end (off=%d, len=%d)",
 							block, off, attname,
 							offset, len, linp->lp_off, linp->lp_len)));
-
-			/*
-			 * XXX We can get here for internal pages, because we include only
-			 * values needed to decide where to go next. In that case we
-			 * should not print the warning at all. We should still do some
-			 * checks, e.g. that we matched the expected end of data, and so
-			 * on.
-			 */
-			Assert(!P_ISLEAF(opaque));
 
 			return false;
 		}
